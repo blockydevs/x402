@@ -10,6 +10,9 @@
 import Ajv from "ajv/dist/2020.js";
 import type { PaymentPayload, PaymentRequirements, PaymentRequirementsV1 } from "@x402/core/types";
 import type { DiscoveryExtension, DiscoveryInfo } from "./types";
+import type { McpDiscoveryInfo } from "./mcp/types";
+import type { DiscoveredHTTPResource } from "./http/types";
+import type { DiscoveredMCPResource } from "./mcp/types";
 import { BAZAAR } from "./types";
 import { extractDiscoveryInfoV1 } from "./v1/facilitator";
 
@@ -99,12 +102,10 @@ export function validateDiscoveryExtension(extension: DiscoveryExtension): Valid
  * }
  * ```
  */
-export interface DiscoveredResource {
-  resourceUrl: string;
-  method: string;
-  x402Version: number;
-  discoveryInfo: DiscoveryInfo;
-}
+export type { DiscoveredHTTPResource } from "./http/types";
+export type { DiscoveredMCPResource } from "./mcp/types";
+
+export type DiscoveredResource = DiscoveredHTTPResource | DiscoveredMCPResource;
 
 /**
  * Extracts discovery information from payment payload and requirements.
@@ -127,7 +128,7 @@ export function extractDiscoveryInfo(
     resourceUrl = paymentPayload.resource?.url ?? "";
 
     if (paymentPayload.extensions) {
-      const bazaarExtension = paymentPayload.extensions[BAZAAR];
+      const bazaarExtension = paymentPayload.extensions[BAZAAR.key];
 
       if (bazaarExtension && typeof bazaarExtension === "object") {
         try {
@@ -162,12 +163,36 @@ export function extractDiscoveryInfo(
     return null;
   }
 
-  return {
-    resourceUrl,
-    method: discoveryInfo.input.method,
+  // Strip query params (?) and hash sections (#) for discovery cataloging
+  const url = new URL(resourceUrl);
+  const normalizedResourceUrl = `${url.origin}${url.pathname}`;
+
+  // Extract description and mimeType from resource info (v2) or requirements (v1)
+  let description: string | undefined;
+  let mimeType: string | undefined;
+
+  if (paymentPayload.x402Version === 2) {
+    description = paymentPayload.resource?.description;
+    mimeType = paymentPayload.resource?.mimeType;
+  } else if (paymentPayload.x402Version === 1) {
+    const requirementsV1 = paymentRequirements as PaymentRequirementsV1;
+    description = requirementsV1.description;
+    mimeType = requirementsV1.mimeType;
+  }
+
+  const base = {
+    resourceUrl: normalizedResourceUrl,
+    description,
+    mimeType,
     x402Version: paymentPayload.x402Version,
     discoveryInfo,
   };
+
+  if (discoveryInfo.input.type === "mcp") {
+    return { ...base, toolName: (discoveryInfo as McpDiscoveryInfo).input.toolName };
+  }
+
+  return { ...base, method: discoveryInfo.input.method };
 }
 
 /**

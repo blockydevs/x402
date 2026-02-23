@@ -2,6 +2,7 @@ package cash
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -80,39 +81,37 @@ func (f *SchemeNetworkFacilitator) GetSigners(_ x402.Network) []string {
 }
 
 // Verify verifies a V2 payment payload against requirements (typed)
-func (f *SchemeNetworkFacilitator) Verify(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*x402.VerifyResponse, error) {
-	network := x402.Network(requirements.Network)
-
+func (f *SchemeNetworkFacilitator) Verify(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements, _ *x402.FacilitatorContext) (*x402.VerifyResponse, error) {
 	// Extract payload fields
 	signature, ok := payload.Payload["signature"].(string)
 	if !ok {
-		return nil, x402.NewVerifyError("missing_signature", "", network, nil)
+		return nil, x402.NewVerifyError("missing_signature", "", "missing signature")
 	}
 
 	name, ok := payload.Payload["name"].(string)
 	if !ok {
-		return nil, x402.NewVerifyError("missing_name", "", network, nil)
+		return nil, x402.NewVerifyError("missing_name", "", "missing name")
 	}
 
 	validUntilStr, ok := payload.Payload["validUntil"].(string)
 	if !ok {
-		return nil, x402.NewVerifyError("missing_validUntil", "", network, nil)
+		return nil, x402.NewVerifyError("missing_validUntil", "", "missing validUntil")
 	}
 
 	// Check signature
 	expectedSig := fmt.Sprintf("~%s", name)
 	if signature != expectedSig {
-		return nil, x402.NewVerifyError("invalid_signature", signature, network, nil)
+		return nil, x402.NewVerifyError("invalid_signature", signature, fmt.Sprintf("invalid signature: %s != %s", signature, expectedSig))
 	}
 
 	// Check expiration
 	validUntil, err := strconv.ParseInt(validUntilStr, 10, 64)
 	if err != nil {
-		return nil, x402.NewVerifyError("invalid_validUntil", signature, network, err)
+		return nil, x402.NewVerifyError("invalid_validUntil", signature, fmt.Sprintf("invalid validUntil: %s", validUntilStr))
 	}
 
 	if validUntil < time.Now().Unix() {
-		return nil, x402.NewVerifyError("expired_signature", signature, network, nil)
+		return nil, x402.NewVerifyError("expired_signature", signature, fmt.Sprintf("expired signature: %d < %d", validUntil, time.Now().Unix()))
 	}
 
 	return &x402.VerifyResponse{
@@ -122,17 +121,18 @@ func (f *SchemeNetworkFacilitator) Verify(ctx context.Context, payload types.Pay
 }
 
 // Settle settles a V2 payment (typed)
-func (f *SchemeNetworkFacilitator) Settle(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*x402.SettleResponse, error) {
+func (f *SchemeNetworkFacilitator) Settle(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements, fctx *x402.FacilitatorContext) (*x402.SettleResponse, error) {
 	network := x402.Network(requirements.Network)
 
 	// First verify the payment
-	verifyResponse, err := f.Verify(ctx, payload, requirements)
+	verifyResponse, err := f.Verify(ctx, payload, requirements, fctx)
 	if err != nil {
 		// Convert VerifyError to SettleError
-		if ve, ok := err.(*x402.VerifyError); ok {
-			return nil, x402.NewSettleError(ve.Reason, ve.Payer, ve.Network, "", ve.Err)
+		var ve *x402.VerifyError
+		if errors.As(err, &ve) {
+			return nil, x402.NewSettleError(ve.InvalidReason, ve.Payer, network, "", ve.InvalidMessage)
 		}
-		return nil, x402.NewSettleError("verification_failed", "", network, "", err)
+		return nil, x402.NewSettleError("verification_failed", "", network, "", err.Error())
 	}
 
 	// Extract name for transaction message

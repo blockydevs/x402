@@ -1,5 +1,4 @@
 import os
-from typing import Any, Dict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -38,6 +37,7 @@ app.middleware("http")(
         ),
     )
 )
+
 
 @app.get("/premium/content")
 async def get_premium_content() -> FileResponse:

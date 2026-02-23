@@ -1,13 +1,43 @@
-import { PaymentPayload, PaymentRequirements, SchemeNetworkClient } from "@x402/core/types";
-import { getAddress } from "viem";
-import { authorizationTypes } from "../../constants";
+import {
+  PaymentRequirements,
+  SchemeNetworkClient,
+  PaymentPayloadResult,
+  PaymentPayloadContext,
+} from "@x402/core/types";
+import { EIP2612_GAS_SPONSORING } from "@x402/extensions";
 import { ClientEvmSigner } from "../../signer";
-import { ExactEvmPayloadV2 } from "../../types";
-import { createNonce } from "../../utils";
+import { AssetTransferMethod } from "../../types";
+import { PERMIT2_ADDRESS } from "../../constants";
+import { getAddress } from "viem";
+import { createEIP3009Payload } from "./eip3009";
+import { createPermit2Payload } from "./permit2";
+import { signEip2612Permit } from "./eip2612";
+
+/** ERC20 allowance ABI for checking Permit2 approval */
+const erc20AllowanceAbi = [
+  {
+    type: "function",
+    name: "allowance",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ type: "uint256" }],
+    stateMutability: "view",
+  },
+] as const;
 
 /**
  * EVM client implementation for the Exact payment scheme.
+ * Supports both EIP-3009 (transferWithAuthorization) and Permit2 flows.
  *
+ * Routes to the appropriate authorization method based on
+ * `requirements.extra.assetTransferMethod`. Defaults to EIP-3009
+ * for backward compatibility with older facilitators.
+ *
+ * When the server advertises `eip2612GasSponsoring` and the asset transfer
+ * method is `permit2`, the scheme automatically signs an EIP-2612 permit
+ * if the user lacks Permit2 approval. This requires `readContract` on the signer.
  */
 export class ExactEvmScheme implements SchemeNetworkClient {
   readonly scheme = "exact";
@@ -15,89 +45,125 @@ export class ExactEvmScheme implements SchemeNetworkClient {
   /**
    * Creates a new ExactEvmClient instance.
    *
-   * @param signer - The EVM signer for client operations
+   * @param signer - The EVM signer for client operations.
+   *   Must support `readContract` for EIP-2612 gas sponsoring.
+   *   Use `createWalletClient(...).extend(publicActions)` or `toClientEvmSigner(account, publicClient)`.
    */
   constructor(private readonly signer: ClientEvmSigner) {}
 
   /**
    * Creates a payment payload for the Exact scheme.
+   * Routes to EIP-3009 or Permit2 based on requirements.extra.assetTransferMethod.
+   *
+   * For Permit2 flows, if the server advertises `eip2612GasSponsoring` and the
+   * signer supports `readContract`, automatically signs an EIP-2612 permit
+   * when Permit2 allowance is insufficient.
    *
    * @param x402Version - The x402 protocol version
    * @param paymentRequirements - The payment requirements
-   * @returns Promise resolving to a payment payload
+   * @param context - Optional context with server-declared extensions
+   * @returns Promise resolving to a payment payload result (with optional extensions)
    */
   async createPaymentPayload(
     x402Version: number,
     paymentRequirements: PaymentRequirements,
-  ): Promise<Pick<PaymentPayload, "x402Version" | "payload">> {
-    const nonce = createNonce();
-    const now = Math.floor(Date.now() / 1000);
+    context?: PaymentPayloadContext,
+  ): Promise<PaymentPayloadResult> {
+    const assetTransferMethod =
+      (paymentRequirements.extra?.assetTransferMethod as AssetTransferMethod) ?? "eip3009";
 
-    const authorization: ExactEvmPayloadV2["authorization"] = {
-      from: this.signer.address,
-      to: getAddress(paymentRequirements.payTo),
-      value: paymentRequirements.amount,
-      validAfter: (now - 600).toString(), // 10 minutes before
-      validBefore: (now + paymentRequirements.maxTimeoutSeconds).toString(),
-      nonce,
-    };
+    if (assetTransferMethod === "permit2") {
+      const result = await createPermit2Payload(this.signer, x402Version, paymentRequirements);
 
-    // Sign the authorization
-    const signature = await this.signAuthorization(authorization, paymentRequirements);
+      // Check if EIP-2612 gas sponsoring is advertised and we can handle it
+      const eip2612Extensions = await this.trySignEip2612Permit(
+        paymentRequirements,
+        result,
+        context,
+      );
 
-    const payload: ExactEvmPayloadV2 = {
-      authorization,
-      signature,
-    };
+      if (eip2612Extensions) {
+        return {
+          ...result,
+          extensions: eip2612Extensions,
+        };
+      }
 
-    return {
-      x402Version,
-      payload,
-    };
+      return result;
+    }
+
+    return createEIP3009Payload(this.signer, x402Version, paymentRequirements);
   }
 
   /**
-   * Sign the EIP-3009 authorization using EIP-712
+   * Attempts to sign an EIP-2612 permit for gasless Permit2 approval.
    *
-   * @param authorization - The authorization to sign
-   * @param requirements - The payment requirements
-   * @returns Promise resolving to the signature
+   * Returns extension data if:
+   * 1. Server advertises eip2612GasSponsoring
+   * 2. Signer has readContract capability
+   * 3. Current Permit2 allowance is insufficient
+   *
+   * Returns undefined if the extension should not be used.
+   *
+   * @param requirements - The payment requirements from the server
+   * @param result - The payment payload result from the scheme
+   * @param context - Optional context containing server extensions and metadata
+   * @returns Extension data for EIP-2612 gas sponsoring, or undefined if not applicable
    */
-  private async signAuthorization(
-    authorization: ExactEvmPayloadV2["authorization"],
+  private async trySignEip2612Permit(
     requirements: PaymentRequirements,
-  ): Promise<`0x${string}`> {
-    const chainId = parseInt(requirements.network.split(":")[1]);
-
-    if (!requirements.extra?.name || !requirements.extra?.version) {
-      throw new Error(
-        `EIP-712 domain parameters (name, version) are required in payment requirements for asset ${requirements.asset}`,
-      );
+    result: PaymentPayloadResult,
+    context?: PaymentPayloadContext,
+  ): Promise<Record<string, unknown> | undefined> {
+    // Check if server advertises eip2612GasSponsoring
+    if (!context?.extensions?.[EIP2612_GAS_SPONSORING.key]) {
+      return undefined;
     }
 
-    const { name, version } = requirements.extra;
+    // Check that required token metadata is available
+    const tokenName = requirements.extra?.name as string | undefined;
+    const tokenVersion = requirements.extra?.version as string | undefined;
+    if (!tokenName || !tokenVersion) {
+      return undefined;
+    }
 
-    const domain = {
-      name,
-      version,
+    const chainId = parseInt(requirements.network.split(":")[1]);
+    const tokenAddress = getAddress(requirements.asset) as `0x${string}`;
+
+    // Check if user already has sufficient Permit2 allowance
+    try {
+      const allowance = (await this.signer.readContract({
+        address: tokenAddress,
+        abi: erc20AllowanceAbi,
+        functionName: "allowance",
+        args: [this.signer.address, PERMIT2_ADDRESS],
+      })) as bigint;
+
+      if (allowance >= BigInt(requirements.amount)) {
+        return undefined; // Already approved, no need for EIP-2612
+      }
+    } catch {
+      // If we can't check allowance, proceed with EIP-2612 signing
+    }
+
+    // Use the same deadline as the Permit2 authorization
+    const permit2Auth = result.payload?.permit2Authorization as Record<string, unknown> | undefined;
+    const deadline =
+      (permit2Auth?.deadline as string) ??
+      Math.floor(Date.now() / 1000 + requirements.maxTimeoutSeconds).toString();
+
+    // Sign the EIP-2612 permit
+    const info = await signEip2612Permit(
+      this.signer,
+      tokenAddress,
+      tokenName,
+      tokenVersion,
       chainId,
-      verifyingContract: getAddress(requirements.asset),
-    };
+      deadline,
+    );
 
-    const message = {
-      from: getAddress(authorization.from),
-      to: getAddress(authorization.to),
-      value: BigInt(authorization.value),
-      validAfter: BigInt(authorization.validAfter),
-      validBefore: BigInt(authorization.validBefore),
-      nonce: authorization.nonce,
+    return {
+      [EIP2612_GAS_SPONSORING.key]: { info },
     };
-
-    return await this.signer.signTypedData({
-      domain,
-      types: authorizationTypes,
-      primaryType: "TransferWithAuthorization",
-      message,
-    });
   }
 }

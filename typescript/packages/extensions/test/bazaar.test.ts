@@ -11,13 +11,16 @@ import {
   extractDiscoveryInfoFromExtension,
   extractDiscoveryInfoV1,
   validateAndExtract,
+  bazaarResourceServerExtension,
 } from "../src/bazaar/index";
-import type { BodyDiscoveryInfo, DiscoveryExtension } from "../src/bazaar/types";
+import type { BodyDiscoveryInfo, McpDiscoveryInfo, DiscoveryExtension } from "../src/bazaar/types";
+import type { DiscoveredMCPResource } from "../src/bazaar/facilitator";
+import type { HTTPAdapter, HTTPRequestContext } from "@x402/core/http";
 
 describe("Bazaar Discovery Extension", () => {
   describe("BAZAAR constant", () => {
     it("should export the correct extension identifier", () => {
-      expect(BAZAAR).toBe("bazaar");
+      expect(BAZAAR.key).toBe("bazaar");
     });
   });
 
@@ -322,7 +325,7 @@ describe("Bazaar Discovery Extension", () => {
         accepted: {} as unknown,
         resource: { url: "http://example.com/test" },
         extensions: {
-          [BAZAAR]: extension,
+          [BAZAAR.key]: extension,
         },
       };
 
@@ -331,6 +334,102 @@ describe("Bazaar Discovery Extension", () => {
       expect(discovered).not.toBeNull();
       expect(discovered!.discoveryInfo.input.type).toBe("http");
       expect(discovered!.resourceUrl).toBe("http://example.com/test");
+    });
+
+    it("should strip query params from v2 resourceUrl", () => {
+      const declared = declareDiscoveryExtension({
+        input: { city: "NYC" },
+        inputSchema: {
+          properties: {
+            city: { type: "string" },
+          },
+        },
+      });
+
+      const extension = declared.bazaar;
+
+      const paymentPayload = {
+        x402Version: 2,
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        payload: {},
+        accepted: {} as unknown,
+        resource: {
+          url: "https://api.example.com/weather?city=NYC&units=metric",
+          description: "Weather API",
+          mimeType: "application/json",
+        },
+        extensions: {
+          [BAZAAR.key]: extension,
+        },
+      };
+
+      const discovered = extractDiscoveryInfo(paymentPayload, {} as unknown);
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("https://api.example.com/weather");
+      expect(discovered!.description).toBe("Weather API");
+      expect(discovered!.mimeType).toBe("application/json");
+    });
+
+    it("should strip hash sections from v2 resourceUrl", () => {
+      const declared = declareDiscoveryExtension({
+        input: {},
+        inputSchema: { properties: {} },
+      });
+
+      const extension = declared.bazaar;
+
+      const paymentPayload = {
+        x402Version: 2,
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        payload: {},
+        accepted: {} as unknown,
+        resource: {
+          url: "https://api.example.com/docs#section-1",
+          description: "Docs",
+          mimeType: "text/html",
+        },
+        extensions: {
+          [BAZAAR.key]: extension,
+        },
+      };
+
+      const discovered = extractDiscoveryInfo(paymentPayload, {} as unknown);
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("https://api.example.com/docs");
+    });
+
+    it("should strip both query params and hash sections from v2 resourceUrl", () => {
+      const declared = declareDiscoveryExtension({
+        input: {},
+        inputSchema: { properties: {} },
+      });
+
+      const extension = declared.bazaar;
+
+      const paymentPayload = {
+        x402Version: 2,
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        payload: {},
+        accepted: {} as unknown,
+        resource: {
+          url: "https://api.example.com/page?foo=bar#anchor",
+          description: "Page",
+          mimeType: "text/html",
+        },
+        extensions: {
+          [BAZAAR.key]: extension,
+        },
+      };
+
+      const discovered = extractDiscoveryInfo(paymentPayload, {} as unknown);
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("https://api.example.com/page");
     });
 
     it("should extract info from v1 PaymentRequirements", () => {
@@ -368,6 +467,77 @@ describe("Bazaar Discovery Extension", () => {
       expect(discovered!.discoveryInfo.input.method).toBe("GET");
       expect(discovered!.resourceUrl).toBe("https://api.example.com/data");
       expect(discovered!.method).toBe("GET");
+      expect(discovered!.description).toBe("Get data");
+      expect(discovered!.mimeType).toBe("application/json");
+    });
+
+    it("should strip query params from v1 resourceUrl", () => {
+      const v1Requirements = {
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        maxAmountRequired: "10000",
+        resource: "https://api.example.com/search?q=test&page=1",
+        description: "Search",
+        mimeType: "application/json",
+        outputSchema: {
+          input: {
+            type: "http",
+            method: "GET",
+            discoverable: true,
+            queryParams: { q: "string", page: "number" },
+          },
+        },
+        payTo: "0x...",
+        maxTimeoutSeconds: 300,
+        asset: "0x...",
+        extra: {},
+      };
+
+      const v1Payload = {
+        x402Version: 1,
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        payload: {},
+      };
+
+      const discovered = extractDiscoveryInfo(v1Payload as unknown, v1Requirements as unknown);
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("https://api.example.com/search");
+    });
+
+    it("should strip hash sections from v1 resourceUrl", () => {
+      const v1Requirements = {
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        maxAmountRequired: "10000",
+        resource: "https://api.example.com/docs#section",
+        description: "Docs",
+        mimeType: "application/json",
+        outputSchema: {
+          input: {
+            type: "http",
+            method: "GET",
+            discoverable: true,
+          },
+        },
+        payTo: "0x...",
+        maxTimeoutSeconds: 300,
+        asset: "0x...",
+        extra: {},
+      };
+
+      const v1Payload = {
+        x402Version: 1,
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        payload: {},
+      };
+
+      const discovered = extractDiscoveryInfo(v1Payload as unknown, v1Requirements as unknown);
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("https://api.example.com/docs");
     });
 
     it("should return null when no discovery info is present", () => {
@@ -817,11 +987,11 @@ describe("Bazaar Discovery Extension", () => {
         },
         accepts: [],
         extensions: {
-          [BAZAAR]: extension,
+          [BAZAAR.key]: extension,
         },
       };
 
-      const bazaarExt = paymentRequired.extensions?.[BAZAAR] as DiscoveryExtension;
+      const bazaarExt = paymentRequired.extensions?.[BAZAAR.key] as DiscoveryExtension;
       expect(bazaarExt).toBeDefined();
 
       const validation = validateDiscoveryExtension(bazaarExt);
@@ -915,7 +1085,7 @@ describe("Bazaar Discovery Extension", () => {
         accepted: {} as unknown,
         resource: { url: "http://example.com/v2" },
         extensions: {
-          [BAZAAR]: v2Extension,
+          [BAZAAR.key]: v2Extension,
         },
       };
 
@@ -962,6 +1132,462 @@ describe("Bazaar Discovery Extension", () => {
       expect(typeof v2Discovered!.discoveryInfo.input).toBe(
         typeof v1Discovered!.discoveryInfo.input,
       );
+    });
+  });
+
+  describe("bazaarResourceServerExtension", () => {
+    // Helper to extract method enum from schema
+    const extractMethodEnum = (schema: Record<string, unknown>): string[] => {
+      const props = schema.properties as Record<string, unknown>;
+      const input = props.input as Record<string, unknown>;
+      const inputProps = input.properties as Record<string, unknown>;
+      const method = inputProps.method as Record<string, unknown>;
+      return method.enum as string[];
+    };
+
+    // Helper to extract required fields from schema
+    const extractRequiredFields = (schema: Record<string, unknown>): string[] => {
+      const props = schema.properties as Record<string, unknown>;
+      const input = props.input as Record<string, unknown>;
+      return input.required as string[];
+    };
+
+    // Mock adapter for testing
+    const createMockAdapter = (): HTTPAdapter => ({
+      getHeader: () => undefined,
+      getMethod: () => "POST",
+      getPath: () => "/test",
+      getUrl: () => "http://localhost/test",
+      getAcceptHeader: () => "application/json",
+      getUserAgent: () => "test-agent",
+    });
+
+    it("should narrow method enum in schema for POST request", () => {
+      const declared = declareDiscoveryExtension({
+        input: { prompt: "test" },
+        inputSchema: { properties: { prompt: { type: "string" } } },
+        bodyType: "json",
+      });
+
+      const extension = declared.bazaar;
+
+      // Before enrichment, schema has broad enum
+      const beforeEnum = extractMethodEnum(extension.schema as Record<string, unknown>);
+      expect(beforeEnum).toEqual(["POST", "PUT", "PATCH"]);
+
+      const httpContext: HTTPRequestContext = {
+        method: "POST",
+        path: "/test",
+        adapter: createMockAdapter(),
+      };
+
+      const enriched = bazaarResourceServerExtension.enrichDeclaration!(
+        extension,
+        httpContext,
+      ) as DiscoveryExtension;
+
+      // After enrichment, schema should have narrow enum
+      const afterEnum = extractMethodEnum(enriched.schema as Record<string, unknown>);
+      expect(afterEnum).toEqual(["POST"]);
+    });
+
+    it("should narrow method enum in schema for GET request", () => {
+      const declared = declareDiscoveryExtension({
+        input: { query: "test" },
+        inputSchema: { properties: { query: { type: "string" } } },
+      });
+
+      const extension = declared.bazaar;
+
+      // Before enrichment, schema has broad enum
+      const beforeEnum = extractMethodEnum(extension.schema as Record<string, unknown>);
+      expect(beforeEnum).toEqual(["GET", "HEAD", "DELETE"]);
+
+      const httpContext: HTTPRequestContext = {
+        method: "GET",
+        path: "/test",
+        adapter: createMockAdapter(),
+      };
+
+      const enriched = bazaarResourceServerExtension.enrichDeclaration!(
+        extension,
+        httpContext,
+      ) as DiscoveryExtension;
+
+      // After enrichment, schema should have narrow enum
+      const afterEnum = extractMethodEnum(enriched.schema as Record<string, unknown>);
+      expect(afterEnum).toEqual(["GET"]);
+    });
+
+    it("should enrich declaration with method in info.input", () => {
+      const declared = declareDiscoveryExtension({
+        input: { data: "test" },
+        inputSchema: { properties: { data: { type: "string" } } },
+        bodyType: "json",
+      });
+
+      const extension = declared.bazaar;
+
+      const httpContext: HTTPRequestContext = {
+        method: "POST",
+        path: "/test",
+        adapter: createMockAdapter(),
+      };
+
+      const enriched = bazaarResourceServerExtension.enrichDeclaration!(
+        extension,
+        httpContext,
+      ) as DiscoveryExtension;
+
+      // Method should be set in info.input
+      expect((enriched.info as BodyDiscoveryInfo).input.method).toBe("POST");
+    });
+
+    it("should add method to required array if not already present", () => {
+      const declared = declareDiscoveryExtension({
+        input: { prompt: "test" },
+        inputSchema: { properties: { prompt: { type: "string" } } },
+        bodyType: "json",
+      });
+
+      const extension = declared.bazaar;
+
+      const httpContext: HTTPRequestContext = {
+        method: "POST",
+        path: "/test",
+        adapter: createMockAdapter(),
+      };
+
+      const enriched = bazaarResourceServerExtension.enrichDeclaration!(
+        extension,
+        httpContext,
+      ) as DiscoveryExtension;
+
+      const required = extractRequiredFields(enriched.schema as Record<string, unknown>);
+      expect(required).toContain("method");
+    });
+
+    it("should return unchanged declaration for non-HTTP context", () => {
+      const declared = declareDiscoveryExtension({
+        input: { data: "test" },
+        inputSchema: { properties: { data: { type: "string" } } },
+        bodyType: "json",
+      });
+
+      const extension = declared.bazaar;
+
+      // Non-HTTP context (missing adapter property)
+      const nonHTTPContext = { method: "POST" };
+
+      const result = bazaarResourceServerExtension.enrichDeclaration!(
+        extension,
+        nonHTTPContext,
+      ) as DiscoveryExtension;
+
+      // Should return unchanged - schema still has broad enum
+      const methodEnum = extractMethodEnum(result.schema as Record<string, unknown>);
+      expect(methodEnum).toEqual(["POST", "PUT", "PATCH"]);
+    });
+  });
+
+  describe("declareDiscoveryExtension - MCP tool", () => {
+    it("should create a valid MCP extension with tool info", () => {
+      const result = declareDiscoveryExtension({
+        toolName: "financial_analysis",
+        description: "Analyze financial data for a given ticker",
+        inputSchema: {
+          type: "object",
+          properties: {
+            ticker: { type: "string", description: "Stock ticker symbol" },
+            analysis_type: {
+              type: "string",
+              enum: ["fundamental", "technical", "sentiment"],
+            },
+          },
+          required: ["ticker"],
+        },
+        example: { ticker: "AAPL", analysis_type: "fundamental" },
+      });
+
+      expect(result).toHaveProperty("bazaar");
+      const extension = result.bazaar;
+      expect(extension).toHaveProperty("info");
+      expect(extension).toHaveProperty("schema");
+      expect(extension.info.input.type).toBe("mcp");
+      expect((extension.info as McpDiscoveryInfo).input.toolName).toBe("financial_analysis");
+      expect((extension.info as McpDiscoveryInfo).input.description).toBe(
+        "Analyze financial data for a given ticker",
+      );
+      expect((extension.info as McpDiscoveryInfo).input.inputSchema).toBeDefined();
+      expect((extension.info as McpDiscoveryInfo).input.example).toEqual({
+        ticker: "AAPL",
+        analysis_type: "fundamental",
+      });
+    });
+
+    it("should create an MCP extension without optional fields", () => {
+      const result = declareDiscoveryExtension({
+        toolName: "simple_tool",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+        },
+      });
+
+      const extension = result.bazaar;
+      expect(extension.info.input.type).toBe("mcp");
+      expect((extension.info as McpDiscoveryInfo).input.toolName).toBe("simple_tool");
+      expect((extension.info as McpDiscoveryInfo).input.description).toBeUndefined();
+      expect((extension.info as McpDiscoveryInfo).input.example).toBeUndefined();
+    });
+
+    it("should create an MCP extension with transport field", () => {
+      const result = declareDiscoveryExtension({
+        toolName: "streaming_tool",
+        transport: "sse",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+        },
+      });
+
+      const extension = result.bazaar;
+      expect(extension.info.input.type).toBe("mcp");
+      expect((extension.info as McpDiscoveryInfo).input.transport).toBe("sse");
+    });
+
+    it("should omit transport when not provided (defaults to streamable-http per spec)", () => {
+      const result = declareDiscoveryExtension({
+        toolName: "default_transport_tool",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+        },
+      });
+
+      const extension = result.bazaar;
+      expect((extension.info as McpDiscoveryInfo).input.transport).toBeUndefined();
+    });
+
+    it("should create an MCP extension with output example", () => {
+      const result = declareDiscoveryExtension({
+        toolName: "weather_tool",
+        inputSchema: {
+          type: "object",
+          properties: {
+            city: { type: "string" },
+          },
+        },
+        output: {
+          example: { temperature: 72, condition: "sunny" },
+        },
+      });
+
+      const extension = result.bazaar;
+      expect(extension.info.output?.example).toEqual({ temperature: 72, condition: "sunny" });
+    });
+  });
+
+  describe("validateDiscoveryExtension - MCP", () => {
+    it("should validate a correct MCP extension", () => {
+      const declared = declareDiscoveryExtension({
+        toolName: "my_tool",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+        },
+      });
+
+      const extension = declared.bazaar;
+      const result = validateDiscoveryExtension(extension);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toBeUndefined();
+    });
+
+    it("should validate an MCP extension with all optional fields", () => {
+      const declared = declareDiscoveryExtension({
+        toolName: "full_tool",
+        description: "A fully specified tool",
+        transport: "streamable-http",
+        inputSchema: {
+          type: "object",
+          properties: {
+            input: { type: "string" },
+          },
+          required: ["input"],
+        },
+        example: { input: "test" },
+        output: {
+          example: { result: "success" },
+        },
+      });
+
+      const extension = declared.bazaar;
+      const result = validateDiscoveryExtension(extension);
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  describe("extractDiscoveryInfo - MCP", () => {
+    it("should extract MCP discovery info with tool name as method", () => {
+      const declared = declareDiscoveryExtension({
+        toolName: "financial_analysis",
+        description: "Analyze financial data",
+        inputSchema: {
+          type: "object",
+          properties: {
+            ticker: { type: "string" },
+          },
+        },
+      });
+
+      const extension = declared.bazaar;
+
+      const paymentPayload = {
+        x402Version: 2,
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        payload: {},
+        accepted: {} as unknown,
+        resource: {
+          url: "https://mcp.example.com/tools",
+          description: "MCP Tool Server",
+          mimeType: "application/json",
+        },
+        extensions: {
+          [BAZAAR.key]: extension,
+        },
+      };
+
+      const discovered = extractDiscoveryInfo(paymentPayload, {} as unknown);
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.discoveryInfo.input.type).toBe("mcp");
+      expect((discovered as DiscoveredMCPResource).toolName).toBe("financial_analysis");
+      expect(discovered!.resourceUrl).toBe("https://mcp.example.com/tools");
+      expect(discovered!.description).toBe("MCP Tool Server");
+    });
+
+    it("should strip query params from MCP resource URL", () => {
+      const declared = declareDiscoveryExtension({
+        toolName: "search",
+        inputSchema: { type: "object", properties: {} },
+      });
+
+      const extension = declared.bazaar;
+
+      const paymentPayload = {
+        x402Version: 2,
+        scheme: "exact",
+        network: "eip155:8453" as unknown,
+        payload: {},
+        accepted: {} as unknown,
+        resource: {
+          url: "https://mcp.example.com/tools?session=abc",
+        },
+        extensions: {
+          [BAZAAR.key]: extension,
+        },
+      };
+
+      const discovered = extractDiscoveryInfo(paymentPayload, {} as unknown);
+
+      expect(discovered).not.toBeNull();
+      expect(discovered!.resourceUrl).toBe("https://mcp.example.com/tools");
+    });
+  });
+
+  describe("validateAndExtract - MCP", () => {
+    it("should validate and extract MCP discovery info", () => {
+      const declared = declareDiscoveryExtension({
+        toolName: "code_review",
+        description: "Review code changes",
+        inputSchema: {
+          type: "object",
+          properties: {
+            diff: { type: "string" },
+            language: { type: "string" },
+          },
+          required: ["diff"],
+        },
+        example: { diff: "--- a/file.ts\n+++ b/file.ts", language: "typescript" },
+      });
+
+      const extension = declared.bazaar;
+      const result = validateAndExtract(extension);
+      expect(result.valid).toBe(true);
+      expect(result.info).toBeDefined();
+      expect(result.info!.input.type).toBe("mcp");
+    });
+  });
+
+  describe("extractDiscoveryInfoFromExtension - MCP", () => {
+    it("should extract info from a valid MCP extension", () => {
+      const declared = declareDiscoveryExtension({
+        toolName: "translate",
+        inputSchema: {
+          type: "object",
+          properties: {
+            text: { type: "string" },
+            target_language: { type: "string" },
+          },
+        },
+      });
+
+      const extension = declared.bazaar;
+      const info = extractDiscoveryInfoFromExtension(extension);
+      expect(info).toEqual(extension.info);
+      expect(info.input.type).toBe("mcp");
+    });
+  });
+
+  describe("bazaarResourceServerExtension - MCP", () => {
+    it("should not modify MCP extensions even with HTTP context", () => {
+      const declared = declareDiscoveryExtension({
+        toolName: "my_tool",
+        description: "A tool",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+        },
+      });
+
+      const extension = declared.bazaar;
+
+      const mockAdapter: HTTPAdapter = {
+        getMethod: () => "POST",
+        getUrl: () => new URL("http://localhost/test"),
+        getHeader: () => undefined,
+        setHeader: () => {},
+        setStatusCode: () => {},
+        setBody: () => {},
+        getBody: () => ({}),
+      };
+
+      const httpContext: HTTPRequestContext = {
+        method: "POST",
+        path: "/test",
+        adapter: mockAdapter,
+      };
+
+      const enriched = bazaarResourceServerExtension.enrichDeclaration!(
+        extension,
+        httpContext,
+      ) as DiscoveryExtension;
+
+      // MCP extension should remain unchanged
+      expect(enriched.info.input.type).toBe("mcp");
+      expect((enriched.info as McpDiscoveryInfo).input.toolName).toBe("my_tool");
     });
   });
 });

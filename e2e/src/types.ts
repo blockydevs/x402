@@ -1,4 +1,8 @@
-export type ProtocolFamily = 'evm' | 'svm';
+import type { NetworkSet } from './networks/networks';
+
+export type ProtocolFamily = 'evm' | 'svm' | 'aptos';
+export type Transport = 'http' | 'mcp';
+export type TransferMethod = 'eip3009' | 'permit2';
 
 export interface ClientResult {
   success: boolean;
@@ -11,6 +15,7 @@ export interface ClientResult {
 export interface ClientConfig {
   evmPrivateKey: string;
   svmPrivateKey: string;
+  aptosPrivateKey: string;
   serverUrl: string;
   endpointPath: string;
 }
@@ -19,8 +24,8 @@ export interface ServerConfig {
   port: number;
   evmPayTo: string;
   svmPayTo: string;
-  evmNetwork: string;
-  svmNetwork: string;
+  aptosPayTo: string;
+  networks: NetworkSet;
   facilitatorUrl?: string;
 }
 
@@ -36,14 +41,13 @@ export interface ClientProxy {
   call(config: ClientConfig): Promise<ClientResult>;
 }
 
-// New types for dynamic discovery
 export interface TestEndpoint {
   path: string;
   method: string;
   description: string;
   requiresPayment?: boolean;
   protocolFamily?: ProtocolFamily;
-  networks?: string[];
+  transferMethod?: TransferMethod;
   health?: boolean;
   close?: boolean;
 }
@@ -51,11 +55,15 @@ export interface TestEndpoint {
 export interface TestConfig {
   name: string;
   type: 'server' | 'client' | 'facilitator';
+  transport?: Transport;
   language: string;
   protocolFamilies?: ProtocolFamily[];
-  x402Version?: number; // For servers - single version they implement
-  x402Versions?: number[]; // For clients and facilitators - array of versions they support
-  extensions?: string[]; // Protocol extensions supported (e.g., ["bazaar"])
+  x402Version?: number;
+  x402Versions?: number[];
+  extensions?: string[];
+  evm?: {
+    transferMethods: TransferMethod[];
+  };
   endpoints?: TestEndpoint[];
   supportedMethods?: string[];
   capabilities?: {
@@ -102,11 +110,6 @@ export interface TestScenario {
   facilitator?: DiscoveredFacilitator;
   endpoint: TestEndpoint;
   protocolFamily: ProtocolFamily;
-  facilitatorNetworkCombo: {
-    useCdpFacilitator: boolean;
-    network: string;
-    facilitatorUrl?: string;
-  };
 }
 
 export interface ScenarioResult {
@@ -115,4 +118,4 @@ export interface ScenarioResult {
   data?: any;
   status_code?: number;
   payment_response?: any;
-} 
+}

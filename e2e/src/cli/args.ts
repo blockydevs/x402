@@ -1,4 +1,5 @@
 import { TestFilters } from './filters';
+import type { NetworkMode } from '../networks/networks';
 
 /**
  * Parse command-line arguments
@@ -8,9 +9,13 @@ export interface ParsedArgs {
   mode: 'interactive' | 'programmatic';
   verbose: boolean;
   logFile?: string;
+  outputJson?: string;
   filters: TestFilters;
   showHelp: boolean;
   minimize: boolean;
+  networkMode?: NetworkMode;  // undefined = prompt user, set = skip prompt
+  parallel: boolean;
+  concurrency: number;
 }
 
 export function parseArgs(): ParsedArgs {
@@ -23,12 +28,15 @@ export function parseArgs(): ParsedArgs {
       verbose: false,
       filters: {},
       showHelp: true,
-      minimize: false
+      minimize: false,
+      parallel: false,
+      concurrency: 4,
     };
   }
 
   // Check if any filter args present -> programmatic mode
   const hasFilterArgs = args.some(arg => 
+    arg.startsWith('--transport=') ||
     arg.startsWith('--facilitators=') ||
     arg.startsWith('--servers=') ||
     arg.startsWith('--clients=') ||
@@ -45,10 +53,27 @@ export function parseArgs(): ParsedArgs {
   // Parse log file
   const logFile = args.find(arg => arg.startsWith('--log-file='))?.split('=')[1];
 
+  // Parse JSON output file
+  const outputJson = args.find(arg => arg.startsWith('--output-json='))?.split('=')[1];
+
   // Parse minimize flag
   const minimize = args.includes('--min');
 
+  // Parse parallel mode flags
+  const parallel = args.includes('--parallel');
+  const concurrencyArg = args.find(arg => arg.startsWith('--concurrency='))?.split('=')[1];
+  const concurrency = concurrencyArg ? parseInt(concurrencyArg, 10) : 4;
+
+  // Parse network mode (optional - if not set, will prompt in interactive mode)
+  let networkMode: NetworkMode | undefined;
+  if (args.includes('--mainnet')) {
+    networkMode = 'mainnet';
+  } else if (args.includes('--testnet')) {
+    networkMode = 'testnet';
+  }
+
   // Parse filters (comma-separated lists)
+  const transports = parseListArg(args, '--transport');
   const facilitators = parseListArg(args, '--facilitators');
   const servers = parseListArg(args, '--servers');
   const clients = parseListArg(args, '--clients');
@@ -60,7 +85,9 @@ export function parseArgs(): ParsedArgs {
     mode,
     verbose,
     logFile,
+    outputJson,
     filters: {
+      transports,
       facilitators,
       servers,
       clients,
@@ -69,7 +96,10 @@ export function parseArgs(): ParsedArgs {
       protocolFamilies: families,
     },
     showHelp: false,
-    minimize
+    minimize,
+    networkMode,
+    parallel,
+    concurrency,
   };
 }
 
@@ -87,7 +117,13 @@ export function printHelp(): void {
   console.log('  pnpm test                  Launch interactive prompt mode');
   console.log('  pnpm test -v               Interactive with verbose logging');
   console.log('');
+  console.log('Network Selection:');
+  console.log('  --testnet                  Use testnet networks (Base Sepolia + Solana Devnet)');
+  console.log('  --mainnet                  Use mainnet networks (Base + Solana) ⚠️  Real funds!');
+  console.log('  (If not specified, will prompt in interactive mode)');
+  console.log('');
   console.log('Programmatic Mode (for CI/workflows):');
+  console.log('  --transport=<list>         Comma-separated transports (e.g., http,mcp)');
   console.log('  --facilitators=<list>      Comma-separated facilitator names');
   console.log('  --servers=<list>           Comma-separated server names');
   console.log('  --clients=<list>           Comma-separated client names');
@@ -98,22 +134,22 @@ export function printHelp(): void {
   console.log('Options:');
   console.log('  -v, --verbose              Enable verbose logging');
   console.log('  --log-file=<path>          Save verbose output to file');
+  console.log('  --output-json=<path>       Write structured JSON results to file');
   console.log('  --min                      Minimize tests (coverage-based skipping)');
+  console.log('  --parallel                 Run server+facilitator combos concurrently');
+  console.log('  --concurrency=<N>          Max concurrent combos (default: 4, requires --parallel)');
   console.log('  -h, --help                 Show this help message');
   console.log('');
   console.log('Examples:');
-  console.log('  pnpm test                                           # Interactive mode');
-  console.log('  pnpm test -v                                        # Interactive with verbose');
-  console.log('  pnpm test --min                                     # Minimize tests');
-  console.log('  pnpm test --facilitators=go --servers=express       # Programmatic');
-  console.log('  pnpm test --facilitators=go,typescript \\');
-  console.log('            --servers=legacy-express \\');
-  console.log('            --clients=go-http \\');
-  console.log('            --extensions=bazaar -v                    # Full example');
-  console.log('  pnpm test --min --facilitators=go,typescript \\');
-  console.log('            --extensions=bazaar -v                    # Minimized with filters');
+  console.log('  pnpm test                                           # Interactive mode (testnet)');
+  console.log('  pnpm test --testnet                                 # Skip network prompt');
+  console.log('  pnpm test --mainnet                                 # Use mainnet (real funds!)');
+  console.log('  pnpm test --min -v                                  # Minimize with verbose');
+  console.log('  pnpm test --transport=mcp                                # MCP transport only');
+  console.log('  pnpm test --mainnet --facilitators=go --servers=express  # Mainnet programmatic');
+  console.log('  pnpm test --testnet --min --parallel -v                   # Parallel mode');
+  console.log('  pnpm test --testnet --min --parallel --concurrency=2 -v   # Limited concurrency');
   console.log('');
-  console.log('Note: Extensions control test output visibility, not scenario filtering');
+  console.log('Note: --mainnet requires funded wallets with real tokens!');
   console.log('');
 }
-

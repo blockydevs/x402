@@ -18,6 +18,7 @@ import (
 
 	x402 "github.com/coinbase/x402/go"
 	"github.com/coinbase/x402/go/extensions/bazaar"
+	"github.com/coinbase/x402/go/extensions/eip2612gassponsor"
 	exttypes "github.com/coinbase/x402/go/extensions/types"
 	evmmech "github.com/coinbase/x402/go/mechanisms/evm"
 	evm "github.com/coinbase/x402/go/mechanisms/evm/exact/facilitator"
@@ -46,8 +47,6 @@ import (
 
 const (
 	DefaultPort = "4022"
-	Network     = "eip155:84532"
-	Scheme      = "exact"
 )
 
 // Request/Response types
@@ -639,12 +638,81 @@ func (s *realFacilitatorSvmSigner) GetAddresses(ctx context.Context, network str
 	return []solana.PublicKey{s.privateKey.PublicKey()}
 }
 
+// Network configuration helpers
+func getEvmRpcUrl(network string) string {
+	// Check for custom RPC URL first
+	if url := os.Getenv("EVM_RPC_URL"); url != "" {
+		return url
+	}
+	// Default RPC URLs based on network
+	switch network {
+	case "eip155:8453":
+		return "https://mainnet.base.org"
+	case "eip155:84532":
+		return "https://sepolia.base.org"
+	default:
+		return "https://sepolia.base.org"
+	}
+}
+
+func getSvmRpcUrl(network string) string {
+	// Check for custom RPC URL first
+	if url := os.Getenv("SVM_RPC_URL"); url != "" {
+		return url
+	}
+	// Default RPC URLs based on network
+	switch network {
+	case "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp":
+		return "https://api.mainnet-beta.solana.com"
+	case "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1":
+		return "https://api.devnet.solana.com"
+	default:
+		return "https://api.devnet.solana.com"
+	}
+}
+
+// Map v2 CAIP-2 network to v1 network name
+func getV1EvmNetwork(network string) string {
+	switch network {
+	case "eip155:8453":
+		return "base"
+	case "eip155:84532":
+		return "base-sepolia"
+	default:
+		return "base-sepolia"
+	}
+}
+
+func getV1SvmNetwork(network string) string {
+	switch network {
+	case "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp":
+		return "solana"
+	case "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1":
+		return "solana-devnet"
+	default:
+		return "solana-devnet"
+	}
+}
+
 func main() {
 	// Get configuration from environment
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = DefaultPort
 	}
+
+	// Network configuration from environment
+	evmNetwork := os.Getenv("EVM_NETWORK")
+	if evmNetwork == "" {
+		evmNetwork = "eip155:84532" // Default: Base Sepolia
+	}
+	svmNetwork := os.Getenv("SVM_NETWORK")
+	if svmNetwork == "" {
+		svmNetwork = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" // Default: Solana Devnet
+	}
+
+	log.Printf("🌐 EVM Network: %s", evmNetwork)
+	log.Printf("🌐 SVM Network: %s", svmNetwork)
 
 	evmPrivateKey := os.Getenv("EVM_PRIVATE_KEY")
 	if evmPrivateKey == "" {
@@ -656,8 +724,10 @@ func main() {
 		log.Fatal("❌ SVM_PRIVATE_KEY environment variable is required")
 	}
 
-	// Initialize the real EVM blockchain signer (uses default Base Sepolia RPC)
-	evmSigner, err := newRealFacilitatorEvmSigner(evmPrivateKey, "https://sepolia.base.org")
+	// Initialize the real EVM blockchain signer with dynamic RPC URL
+	evmRpcUrl := getEvmRpcUrl(evmNetwork)
+	log.Printf("🌐 EVM RPC URL: %s", evmRpcUrl)
+	evmSigner, err := newRealFacilitatorEvmSigner(evmPrivateKey, evmRpcUrl)
 	if err != nil {
 		log.Fatalf("Failed to create EVM signer: %v", err)
 	}
@@ -665,43 +735,48 @@ func main() {
 	chainID, _ := evmSigner.GetChainID(context.Background())
 	addresses := evmSigner.GetAddresses()
 	log.Printf("EVM Facilitator account: %s", addresses[0])
-	log.Printf("Connected to chain ID: %s (expected: 84532 for Base Sepolia)", chainID.String())
+	log.Printf("Connected to chain ID: %s", chainID.String())
 
-	// Initialize the real SVM blockchain signer (uses default Solana Devnet RPC)
-	svmSigner, err := newRealFacilitatorSvmSigner(svmPrivateKey, "https://api.devnet.solana.com")
+	// Initialize the real SVM blockchain signer with dynamic RPC URL
+	svmRpcUrl := getSvmRpcUrl(svmNetwork)
+	log.Printf("🌐 SVM RPC URL: %s", svmRpcUrl)
+	svmSigner, err := newRealFacilitatorSvmSigner(svmPrivateKey, svmRpcUrl)
 	if err != nil {
 		log.Fatalf("Failed to create SVM signer: %v", err)
 	}
 
-	svmAddresses := svmSigner.GetAddresses(context.Background(), "solana-devnet")
+	svmAddresses := svmSigner.GetAddresses(context.Background(), svmNetwork)
 	log.Printf("SVM Facilitator account: %s", svmAddresses[0].String())
 
 	// Initialize the x402 Facilitator with EVM and SVM support
 	facilitator := x402.Newx402Facilitator()
 
-	// Register EVM schemes with network arrays
+	// Register EVM schemes with dynamic network
 	// Enable smart wallet deployment via EIP-6492
 	evmConfig := &evm.ExactEvmSchemeConfig{
 		DeployERC4337WithEIP6492: true,
 	}
 	evmFacilitatorScheme := evm.NewExactEvmScheme(evmSigner, evmConfig)
-	facilitator.Register([]x402.Network{"eip155:84532"}, evmFacilitatorScheme)
+	facilitator.Register([]x402.Network{x402.Network(evmNetwork)}, evmFacilitatorScheme)
 
 	evmV1Config := &evmv1.ExactEvmSchemeV1Config{
 		DeployERC4337WithEIP6492: true,
 	}
 	evmFacilitatorV1Scheme := evmv1.NewExactEvmSchemeV1(evmSigner, evmV1Config)
-	facilitator.RegisterV1([]x402.Network{"base-sepolia"}, evmFacilitatorV1Scheme)
+	facilitator.RegisterV1([]x402.Network{x402.Network(getV1EvmNetwork(evmNetwork))}, evmFacilitatorV1Scheme)
 
-	// Register SVM schemes with network arrays
+	// Register SVM schemes with dynamic network
 	svmFacilitatorScheme := svm.NewExactSvmScheme(svmSigner)
-	facilitator.Register([]x402.Network{"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"}, svmFacilitatorScheme) // Devnet
+	facilitator.Register([]x402.Network{x402.Network(svmNetwork)}, svmFacilitatorScheme)
 
 	svmFacilitatorV1Scheme := svmv1.NewExactSvmSchemeV1(svmSigner)
-	facilitator.RegisterV1([]x402.Network{"solana-devnet"}, svmFacilitatorV1Scheme)
+	facilitator.RegisterV1([]x402.Network{x402.Network(getV1SvmNetwork(svmNetwork))}, svmFacilitatorV1Scheme)
 
 	// Register the Bazaar discovery extension
 	facilitator.RegisterExtension(exttypes.BAZAAR)
+
+	// Register the EIP-2612 Gas Sponsoring extension
+	facilitator.RegisterExtension(eip2612gassponsor.EIP2612GasSponsoring)
 
 	// Lifecycle hooks for payment tracking and discovery
 	facilitator.
@@ -995,10 +1070,11 @@ func main() {
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":              "ok",
-			"network":             Network,
+			"evmNetwork":          evmNetwork,
+			"svmNetwork":          svmNetwork,
 			"facilitator":         "go",
 			"version":             "2.0.0",
-			"extensions":          []string{exttypes.BAZAAR},
+			"extensions":          []string{exttypes.BAZAAR.Key()},
 			"discoveredResources": bazaarCatalog.GetCount(),
 		})
 	})
@@ -1023,7 +1099,8 @@ func main() {
 ║              x402 Go Facilitator                       ║
 ╠════════════════════════════════════════════════════════╣
 ║  Server:     http://localhost:%s                      ║
-║  Network:    %s                       ║
+║  EVM Network:    %s                       ║
+║  SVM Network:    %s                       ║
 ║  Address:    %s     ║
 ║  Extensions: bazaar                                    ║
 ║                                                        ║
@@ -1035,7 +1112,7 @@ func main() {
 ║  • GET  /health              (health check)           ║
 ║  • POST /close               (shutdown server)        ║
 ╚════════════════════════════════════════════════════════╝
-`, port, Network, evmSigner.GetAddresses()[0])
+`, port, evmNetwork, svmNetwork, evmSigner.GetAddresses()[0])
 
 	// Log that facilitator is ready (needed for e2e test discovery)
 	log.Println("Facilitator listening")

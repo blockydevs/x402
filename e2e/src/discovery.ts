@@ -13,15 +13,6 @@ import {
   ProtocolFamily
 } from './types';
 
-// Will be populated with discovered facilitators
-let facilitatorNetworkCombos: Array<{
-  useCdpFacilitator: boolean;
-  network: string;
-  protocolFamily: ProtocolFamily;
-  x402Version: number;
-  facilitatorName?: string;
-}> = [];
-
 export class TestDiscovery {
   private baseDir: string;
   private includeLegacy: boolean;
@@ -29,31 +20,6 @@ export class TestDiscovery {
   constructor(baseDir: string = '.', includeLegacy: boolean = false) {
     this.baseDir = baseDir;
     this.includeLegacy = includeLegacy;
-  }
-
-  getFacilitatorNetworkCombos(): typeof facilitatorNetworkCombos {
-    return facilitatorNetworkCombos;
-  }
-
-  /**
-   * Get default networks for a protocol family
-   */
-  getDefaultNetworksForProtocolFamily(protocolFamily: ProtocolFamily): string[] {
-    switch (protocolFamily) {
-      case 'evm':
-        return ['base-sepolia'];
-      case 'svm':
-        return ['solana-devnet'];
-      default:
-        return [];
-    }
-  }
-
-  /**
-   * Get facilitator network combos for a specific protocol family
-   */
-  getFacilitatorNetworkCombosForProtocol(protocolFamily: ProtocolFamily): typeof facilitatorNetworkCombos {
-    return facilitatorNetworkCombos.filter(combo => combo.protocolFamily === protocolFamily);
   }
 
   /**
@@ -167,21 +133,21 @@ export class TestDiscovery {
 
     for (const facilitatorName of facilitatorDirs) {
       const facilitatorDir = join(facilitatorsDir, facilitatorName);
-      
+
       // Special case: external-proxies is a nested directory of more facilitators
       if (facilitatorName === 'external-proxies') {
         verboseLog(`  🔍 Found external-proxies directory, discovering nested facilitators...`);
         this.discoverFacilitatorsInDirectory(facilitatorDir, facilitators, '', true);
         continue;
       }
-      
+
       // Special case: local is a nested directory of more facilitators (inherits isExternal from parent)
       if (facilitatorName === 'local') {
         verboseLog(`  🔍 Found local directory, discovering nested facilitators...`);
         this.discoverFacilitatorsInDirectory(facilitatorDir, facilitators, '', isExternal);
         continue;
       }
-      
+
       const configPath = join(facilitatorDir, 'test.config.json');
 
       if (existsSync(configPath)) {
@@ -238,60 +204,17 @@ export class TestDiscovery {
   }
 
   /**
-   * Build facilitator network combos from discovered facilitators
-   */
-  private buildFacilitatorNetworkCombos(facilitators: DiscoveredFacilitator[]): void {
-    facilitatorNetworkCombos = [];
-
-    for (const facilitator of facilitators) {
-      const protocolFamilies = facilitator.config.protocolFamilies || ['evm'];
-      const x402Versions = facilitator.config.x402Versions || [2];
-
-      for (const protocolFamily of protocolFamilies) {
-        for (const x402Version of x402Versions) {
-          // Add network combos based on protocol family
-          if (protocolFamily === 'evm') {
-            facilitatorNetworkCombos.push({
-              useCdpFacilitator: false,
-              network: 'eip155:84532',
-              protocolFamily: protocolFamily as ProtocolFamily,
-              x402Version,
-              facilitatorName: facilitator.name
-            });
-          } else if (protocolFamily === 'svm') {
-            facilitatorNetworkCombos.push({
-              useCdpFacilitator: false,
-              network: 'solana:devnet',
-              protocolFamily: protocolFamily as ProtocolFamily,
-              x402Version,
-              facilitatorName: facilitator.name
-            });
-          }
-        }
-      }
-    }
-
-    // If no facilitators found, add a default combo for backward compatibility
-    if (facilitatorNetworkCombos.length === 0) {
-      facilitatorNetworkCombos.push({
-        useCdpFacilitator: false,
-        network: 'eip155:84532',
-        protocolFamily: 'evm',
-        x402Version: 2
-      });
-    }
-  }
-
-  /**
    * Generate all possible test scenarios
+   * 
+   * Creates scenarios by matching:
+   * - Clients with servers that have compatible x402 versions
+   * - Endpoints with clients that support the endpoint's protocol family
+   * - Facilitators that support both the protocol family and x402 version
    */
   generateTestScenarios(): TestScenario[] {
     const servers = this.discoverServers();
     const clients = this.discoverClients();
     const facilitators = this.discoverFacilitators();
-
-    // Build facilitator network combos from discovered facilitators
-    this.buildFacilitatorNetworkCombos(facilitators);
 
     const scenarios: TestScenario[] = [];
 
@@ -299,7 +222,7 @@ export class TestDiscovery {
       // Default to EVM if no protocol families specified for backward compatibility
       const clientProtocolFamilies = client.config.protocolFamilies || ['evm'];
 
-      // Get client's supported x402 versions (default to [1] for backward compatibility)
+      // Get client's supported x402 versions
       const clientVersions = client.config.x402Versions;
       if (!clientVersions) {
         errorLog(`  ⚠️  Skipping ${client.name}: No x402 versions specified`);
@@ -307,23 +230,29 @@ export class TestDiscovery {
       }
 
       for (const server of servers) {
-        // Get server's x402 version (default to 1 for backward compatibility)
+        // Get server's x402 version
         const serverVersion = server.config.x402Version;
         if (!serverVersion) {
           errorLog(`  ⚠️  Skipping ${server.name}: No x402 version specified`);
           continue;
         }
 
+        // Check transport compatibility (default to 'http' if not specified)
+        const clientTransport = client.config.transport || 'http';
+        const serverTransport = server.config.transport || 'http';
+        if (clientTransport !== serverTransport) {
+          verboseLog(`  ⚠️  Skipping ${client.name} ↔ ${server.name}: Transport mismatch (client=${clientTransport}, server=${serverTransport})`);
+          continue;
+        }
+
         // Check if client and server have compatible versions
         if (!clientVersions.includes(serverVersion)) {
-          // Skip this client-server pair if versions don't overlap
           verboseLog(`  ⚠️  Skipping ${client.name} ↔ ${server.name}: Version mismatch (client supports [${clientVersions.join(', ')}], server implements ${serverVersion})`);
           continue;
         }
 
         // Only test endpoints that require payment
         const testableEndpoints = server.config.endpoints?.filter(endpoint => {
-          // Only include endpoints that require payment
           return endpoint.requiresPayment;
         }) || [];
 
@@ -332,34 +261,41 @@ export class TestDiscovery {
           const endpointProtocolFamily = endpoint.protocolFamily || 'evm';
 
           // Only create scenarios where client supports endpoint's protocol family
-          if (clientProtocolFamilies.includes(endpointProtocolFamily)) {
-            // Get facilitator/network combos for this protocol family
-            const combosForProtocol = this.getFacilitatorNetworkCombosForProtocol(endpointProtocolFamily);
+          if (!clientProtocolFamilies.includes(endpointProtocolFamily)) {
+            continue;
+          }
 
-            for (const combo of combosForProtocol) {
-              // Skip if facilitator doesn't support the server's x402 version
-              if (combo.x402Version !== serverVersion) {
-                verboseLog(`  ⚠️  Skipping facilitator ${combo.facilitatorName} for ${server.name}: Version mismatch (facilitator supports v${combo.x402Version}, server implements v${serverVersion})`);
-                continue;
-              }
-
-              // Find matching facilitator if specified
-              const matchingFacilitator = combo.facilitatorName
-                ? facilitators.find(f => f.name === combo.facilitatorName)
-                : undefined;
-
-              scenarios.push({
-                client,
-                server,
-                facilitator: matchingFacilitator,
-                endpoint,
-                protocolFamily: endpointProtocolFamily,
-                facilitatorNetworkCombo: {
-                  useCdpFacilitator: combo.useCdpFacilitator,
-                  network: combo.network
-                }
-              });
+          // For EVM endpoints, check transfer method compatibility with client
+          if (endpointProtocolFamily === 'evm') {
+            const endpointTransferMethod = endpoint.transferMethod || 'eip3009';
+            const clientTransferMethods = client.config.evm?.transferMethods || ['eip3009'];
+            if (!clientTransferMethods.includes(endpointTransferMethod)) {
+              verboseLog(`  ⚠️  Skipping ${client.name} ↔ ${server.name} ${endpoint.path}: Transfer method mismatch (client supports [${clientTransferMethods.join(', ')}], endpoint requires ${endpointTransferMethod})`);
+              continue;
             }
+          }
+
+          // Find facilitators that support this protocol family and version
+          const matchingFacilitators = facilitators.filter(f => {
+            const supportsProtocol = f.config.protocolFamilies?.includes(endpointProtocolFamily);
+            const supportsVersion = f.config.x402Versions?.includes(serverVersion);
+            // For EVM, also check transfer method support
+            if (endpointProtocolFamily === 'evm') {
+              const endpointTransferMethod = endpoint.transferMethod || 'eip3009';
+              const facilTransferMethods = f.config.evm?.transferMethods || ['eip3009'];
+              if (!facilTransferMethods.includes(endpointTransferMethod)) return false;
+            }
+            return supportsProtocol && supportsVersion;
+          });
+
+          for (const facilitator of matchingFacilitators) {
+            scenarios.push({
+              client,
+              server,
+              facilitator,
+              endpoint,
+              protocolFamily: endpointProtocolFamily,
+            });
           }
         }
       }
@@ -375,9 +311,6 @@ export class TestDiscovery {
     const servers = this.discoverServers();
     const clients = this.discoverClients();
     const facilitators = this.discoverFacilitators();
-
-    // Build combos to get accurate scenario count
-    this.buildFacilitatorNetworkCombos(facilitators);
     const scenarios = this.generateTestScenarios();
 
     log('🔍 Test Discovery Summary');
@@ -392,37 +325,45 @@ export class TestDiscovery {
         server.config.endpoints?.filter(e => e.requiresPayment).map(e => e.protocolFamily || 'evm') || ['evm']
       );
       const version = server.config.x402Version || 1;
-      log(`   - ${server.name} (${server.config.language}) v${version} - ${paidEndpoints} x402 endpoints [${Array.from(protocolFamilies).join(', ')}]`);
+      const transport = server.config.transport || 'http';
+      log(`   - ${server.name} (${server.config.language}) [${transport}] v${version} - ${paidEndpoints} x402 endpoints [${Array.from(protocolFamilies).join(', ')}]`);
     });
 
     log(`📱 Clients found: ${clients.length}`);
     clients.forEach(client => {
       const protocolFamilies = client.config.protocolFamilies || ['evm'];
       const versions = client.config.x402Versions || [1];
-      log(`   - ${client.name} (${client.config.language}) v[${versions.join(', ')}] [${protocolFamilies.join(', ')}]`);
+      const transport = client.config.transport || 'http';
+      const evmTransferMethods = client.config.evm?.transferMethods || ['eip3009'];
+      const evmInfo = protocolFamilies.includes('evm') ? ` evm:${evmTransferMethods.join(',')}` : '';
+      log(`   - ${client.name} (${client.config.language}) [${transport}] v[${versions.join(', ')}] [${protocolFamilies.join(', ')}]${evmInfo}`);
+      const extInfo = client.config.extensions ? ` {${client.config.extensions.join(', ')}}` : '';
+      log(`   - ${client.name} (${client.config.language}) [${transport}] v[${versions.join(', ')}] [${protocolFamilies.join(', ')}]${extInfo}`);
     });
 
     log(`🏛️ Facilitators found: ${facilitators.length}`);
-    
+
     const regularFacilitators = facilitators.filter(f => !f.isExternal);
     const externalFacilitators = facilitators.filter(f => f.isExternal);
-    
+
     regularFacilitators.forEach(facilitator => {
       const protocolFamilies = facilitator.config.protocolFamilies || ['evm'];
       const versions = facilitator.config.x402Versions || [2];
-      log(`   - ${facilitator.name} (${facilitator.config.language}) v[${versions.join(', ')}] [${protocolFamilies.join(', ')}]`);
+      const evmTransferMethods = facilitator.config.evm?.transferMethods || ['eip3009'];
+      const evmInfo = protocolFamilies.includes('evm') ? ` evm:${evmTransferMethods.join(',')}` : '';
+      log(`   - ${facilitator.name} (${facilitator.config.language}) v[${versions.join(', ')}] [${protocolFamilies.join(', ')}]${evmInfo}`);
     });
-    
+
     if (externalFacilitators.length > 0) {
       log(`   External:`);
       externalFacilitators.forEach(facilitator => {
         const protocolFamilies = facilitator.config.protocolFamilies || ['evm'];
         const versions = facilitator.config.x402Versions || [2];
-        log(`     - ${facilitator.name} (${facilitator.config.language}) v[${versions.join(', ')}] [${protocolFamilies.join(', ')}]`);
+        const evmTransferMethods = facilitator.config.evm?.transferMethods || ['eip3009'];
+        const evmInfo = protocolFamilies.includes('evm') ? ` evm:${evmTransferMethods.join(',')}` : '';
+        log(`     - ${facilitator.name} (${facilitator.config.language}) v[${versions.join(', ')}] [${protocolFamilies.join(', ')}]${evmInfo}`);
       });
     }
-
-    log(`🔧 Facilitator/Network combos: ${this.getFacilitatorNetworkCombos().length}`);
 
     // Show protocol family breakdown
     const protocolBreakdown = scenarios.reduce((acc, scenario) => {
@@ -436,4 +377,4 @@ export class TestDiscovery {
     });
     log('');
   }
-} 
+}

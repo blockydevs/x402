@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/coinbase/x402/go/types"
@@ -30,14 +31,14 @@ func (m *mockSchemeNetworkFacilitatorV1) GetSigners(_ Network) []string {
 	return []string{}
 }
 
-func (m *mockSchemeNetworkFacilitatorV1) Verify(ctx context.Context, payload types.PaymentPayloadV1, requirements types.PaymentRequirementsV1) (*VerifyResponse, error) {
+func (m *mockSchemeNetworkFacilitatorV1) Verify(ctx context.Context, payload types.PaymentPayloadV1, requirements types.PaymentRequirementsV1, _ *FacilitatorContext) (*VerifyResponse, error) {
 	return &VerifyResponse{
 		IsValid: true,
 		Payer:   "0xmockpayer",
 	}, nil
 }
 
-func (m *mockSchemeNetworkFacilitatorV1) Settle(ctx context.Context, payload types.PaymentPayloadV1, requirements types.PaymentRequirementsV1) (*SettleResponse, error) {
+func (m *mockSchemeNetworkFacilitatorV1) Settle(ctx context.Context, payload types.PaymentPayloadV1, requirements types.PaymentRequirementsV1, _ *FacilitatorContext) (*SettleResponse, error) {
 	return &SettleResponse{
 		Success:     true,
 		Transaction: "0xmocktx",
@@ -69,7 +70,7 @@ func (m *mockSchemeNetworkFacilitator) GetSigners(_ Network) []string {
 	return []string{}
 }
 
-func (m *mockSchemeNetworkFacilitator) Verify(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*VerifyResponse, error) {
+func (m *mockSchemeNetworkFacilitator) Verify(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements, _ *FacilitatorContext) (*VerifyResponse, error) {
 	if m.verifyFunc != nil {
 		return m.verifyFunc(ctx, payload, requirements)
 	}
@@ -79,7 +80,7 @@ func (m *mockSchemeNetworkFacilitator) Verify(ctx context.Context, payload types
 	}, nil
 }
 
-func (m *mockSchemeNetworkFacilitator) Settle(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*SettleResponse, error) {
+func (m *mockSchemeNetworkFacilitator) Settle(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements, _ *FacilitatorContext) (*SettleResponse, error) {
 	if m.settleFunc != nil {
 		return m.settleFunc(ctx, payload, requirements)
 	}
@@ -158,21 +159,21 @@ func TestFacilitatorRegister(t *testing.T) {
 func TestFacilitatorRegisterExtension(t *testing.T) {
 	facilitator := Newx402Facilitator()
 
-	facilitator.RegisterExtension("bazaar")
+	facilitator.RegisterExtension(NewFacilitatorExtension("bazaar"))
 	if len(facilitator.extensions) != 1 {
 		t.Fatal("Expected 1 extension")
 	}
-	if facilitator.extensions[0] != "bazaar" {
+	if facilitator.extensions["bazaar"] == nil {
 		t.Fatal("Expected 'bazaar' extension")
 	}
 
 	// Test duplicate registration (should not add twice)
-	facilitator.RegisterExtension("bazaar")
+	facilitator.RegisterExtension(NewFacilitatorExtension("bazaar"))
 	if len(facilitator.extensions) != 1 {
 		t.Fatal("Expected extension to not be duplicated")
 	}
 
-	facilitator.RegisterExtension("sign_in_with_x")
+	facilitator.RegisterExtension(NewFacilitatorExtension("sign_in_with_x"))
 	if len(facilitator.extensions) != 2 {
 		t.Fatal("Expected 2 extensions")
 	}
@@ -209,9 +210,6 @@ func TestFacilitatorVerify(t *testing.T) {
 	response, err := facilitator.Verify(ctx, payloadBytes, requirementsBytes)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
-	}
-	if err != nil {
-		t.Fatalf("Expected no error, got %v", err)
 	}
 	if !response.IsValid {
 		t.Fatal("Expected valid verification")
@@ -287,7 +285,7 @@ func TestFacilitatorVerifySchemeMismatch(t *testing.T) {
 		verifyFunc: func(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*VerifyResponse, error) {
 			// Validate that payload.Accepted.Scheme matches requirements.Scheme
 			if payload.Accepted.Scheme != requirements.Scheme {
-				return nil, NewVerifyError("scheme_mismatch", "", Network(requirements.Network), nil)
+				return nil, NewVerifyError("scheme_mismatch", "", fmt.Sprintf("scheme mismatch: %s != %s", payload.Accepted.Scheme, requirements.Scheme))
 			}
 			return &VerifyResponse{IsValid: true, Payer: "0xpayer"}, nil
 		},
@@ -324,15 +322,16 @@ func TestFacilitatorVerifySchemeMismatch(t *testing.T) {
 
 	// With new architecture, routing happens by requirements.Scheme
 	// Mechanism validates and returns IsValid=false (not necessarily an error)
-	if err != nil {
+	switch {
+	case err != nil:
 		// Error is acceptable for scheme mismatch
 		var paymentErr *PaymentError
 		if errors.As(err, &paymentErr) && paymentErr.Code != ErrCodeSchemeMismatch {
 			t.Fatalf("Expected SchemeMismatch error, got: %s", paymentErr.Code)
 		}
-	} else if response.IsValid {
+	case response.IsValid:
 		t.Fatal("Expected invalid response for scheme mismatch")
-	} else if response.InvalidReason != "scheme_mismatch" {
+	case response.InvalidReason != "scheme_mismatch":
 		t.Fatalf("Expected scheme_mismatch reason, got: %s", response.InvalidReason)
 	}
 }
@@ -345,7 +344,7 @@ func TestFacilitatorVerifyNetworkMismatch(t *testing.T) {
 		verifyFunc: func(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*VerifyResponse, error) {
 			// Validate that payload.Accepted.Network matches requirements.Network
 			if payload.Accepted.Network != requirements.Network {
-				return nil, NewVerifyError("network_mismatch", "", Network(requirements.Network), nil)
+				return nil, NewVerifyError("network_mismatch", "", fmt.Sprintf("network mismatch: %s != %s", payload.Accepted.Network, requirements.Network))
 			}
 			return &VerifyResponse{IsValid: true, Payer: "0xpayer"}, nil
 		},
@@ -381,15 +380,16 @@ func TestFacilitatorVerifyNetworkMismatch(t *testing.T) {
 	response, err := facilitator.Verify(ctx, payloadBytes, requirementsBytes)
 
 	// With new architecture, mechanism validates and returns IsValid=false
-	if err != nil {
+	switch {
+	case err != nil:
 		// Error is acceptable for network mismatch
 		var paymentErr *PaymentError
 		if errors.As(err, &paymentErr) && paymentErr.Code != ErrCodeNetworkMismatch {
 			t.Fatalf("Expected NetworkMismatch error, got: %s", paymentErr.Code)
 		}
-	} else if response.IsValid {
+	case response.IsValid:
 		t.Fatal("Expected invalid response for network mismatch")
-	} else if response.InvalidReason != "network_mismatch" {
+	case response.InvalidReason != "network_mismatch":
 		t.Fatalf("Expected network_mismatch reason, got: %s", response.InvalidReason)
 	}
 }
@@ -453,11 +453,11 @@ func TestFacilitatorSettleVerifiesFirst(t *testing.T) {
 		scheme: "exact",
 		verifyFunc: func(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*VerifyResponse, error) {
 			verifyCallCount++
-			return nil, NewVerifyError("invalid_signature", "", Network(requirements.Network), nil)
+			return nil, NewVerifyError("invalid_signature", "", fmt.Sprintf("invalid signature: %s", payload.Payload["signature"]))
 		},
 		settleFunc: func(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*SettleResponse, error) {
 
-			return nil, NewSettleError("invalid_signature", "", Network(requirements.Network), "", nil)
+			return nil, NewSettleError("invalid_signature", "", Network(requirements.Network), "", "")
 		},
 	}
 
@@ -507,7 +507,7 @@ func TestFacilitatorGetSupported(t *testing.T) {
 	facilitator.Register([]Network{"eip155:1"}, mockFacilitatorV2_1)
 	facilitator.Register([]Network{"eip155:8453"}, mockFacilitatorV2_2)
 	facilitator.RegisterV1([]Network{"eip155:1"}, mockFacilitatorV1_1)
-	facilitator.RegisterExtension("bazaar")
+	facilitator.RegisterExtension(NewFacilitatorExtension("bazaar"))
 
 	supported := facilitator.GetSupported()
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/coinbase/x402/go/types"
@@ -47,8 +48,8 @@ func TestFacilitatorBeforeVerifyHook_Abort(t *testing.T) {
 	// Check error is VerifyError with correct reason
 	ve := &VerifyError{}
 	if errors.As(err, &ve) {
-		if ve.Reason != "Facilitator security check failed" {
-			t.Errorf("Expected specific reason, got '%s'", ve.Reason)
+		if ve.InvalidReason != "Facilitator security check failed" {
+			t.Errorf("Expected specific reason, got '%s'", ve.InvalidReason)
 		}
 	} else {
 		t.Errorf("Expected *VerifyError, got %T", err)
@@ -111,7 +112,7 @@ func TestFacilitatorOnVerifyFailureHook_Recover(t *testing.T) {
 	mockScheme := &mockSchemeFacilitator{
 		scheme: "exact",
 		verifyFunc: func(ctx context.Context, payload types.PaymentPayload, reqs types.PaymentRequirements) (*VerifyResponse, error) {
-			return nil, NewVerifyError("verification_failed", "", Network(reqs.Network), errors.New("verification failed"))
+			return nil, NewVerifyError("verification_failed", "", fmt.Sprintf("verification failed: %s", payload.Payload["signature"]))
 		},
 	}
 	facilitator.Register([]Network{"eip155:8453"}, mockScheme)
@@ -243,7 +244,7 @@ func TestFacilitatorOnSettleFailureHook_Recover(t *testing.T) {
 	mockScheme := &mockSchemeFacilitator{
 		scheme: "exact",
 		settleFunc: func(ctx context.Context, payload types.PaymentPayload, reqs types.PaymentRequirements) (*SettleResponse, error) {
-			return nil, NewSettleError("settlement_failed", "", Network(reqs.Network), "", errors.New("settlement failed"))
+			return nil, NewSettleError("settlement_failed", "", Network(reqs.Network), "", "settlement failed")
 		},
 	}
 	facilitator.Register([]Network{"eip155:8453"}, mockScheme)
@@ -373,14 +374,14 @@ func (m *mockSchemeFacilitator) GetSigners(_ Network) []string {
 	return []string{}
 }
 
-func (m *mockSchemeFacilitator) Verify(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*VerifyResponse, error) {
+func (m *mockSchemeFacilitator) Verify(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements, _ *FacilitatorContext) (*VerifyResponse, error) {
 	if m.verifyFunc != nil {
 		return m.verifyFunc(ctx, payload, requirements)
 	}
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockSchemeFacilitator) Settle(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements) (*SettleResponse, error) {
+func (m *mockSchemeFacilitator) Settle(ctx context.Context, payload types.PaymentPayload, requirements types.PaymentRequirements, _ *FacilitatorContext) (*SettleResponse, error) {
 	if m.settleFunc != nil {
 		return m.settleFunc(ctx, payload, requirements)
 	}

@@ -24,6 +24,10 @@ interface ExtensionDeclaration {
       [key: string]: unknown;
       input?: {
         [key: string]: unknown;
+        properties?: {
+          [key: string]: unknown;
+          method?: Record<string, unknown>;
+        };
         required?: string[];
       };
     };
@@ -31,7 +35,7 @@ interface ExtensionDeclaration {
 }
 
 export const bazaarResourceServerExtension: ResourceServerExtension = {
-  key: BAZAAR,
+  key: BAZAAR.key,
 
   enrichDeclaration: (declaration, transportContext) => {
     if (!isHTTPRequestContext(transportContext)) {
@@ -39,7 +43,25 @@ export const bazaarResourceServerExtension: ResourceServerExtension = {
     }
 
     const extension = declaration as ExtensionDeclaration;
+
+    // MCP extensions don't need HTTP method enrichment
+    if (extension.info?.input?.type === "mcp") {
+      return declaration;
+    }
+
     const method = transportContext.method;
+
+    // At declaration time, the schema uses a broad enum (["GET", "HEAD", "DELETE"] or ["POST", "PUT", "PATCH"])
+    // because the method isn't known until the HTTP context is available.
+    // Here we narrow it to the actual method for precise schema validation.
+    const existingInputProps = extension.schema?.properties?.input?.properties || {};
+    const updatedInputProps = {
+      ...existingInputProps,
+      method: {
+        type: "string",
+        enum: [method],
+      },
+    };
 
     return {
       ...extension,
@@ -56,6 +78,7 @@ export const bazaarResourceServerExtension: ResourceServerExtension = {
           ...(extension.schema?.properties || {}),
           input: {
             ...(extension.schema?.properties?.input || {}),
+            properties: updatedInputProps,
             required: [
               ...(extension.schema?.properties?.input?.required || []),
               ...(!(extension.schema?.properties?.input?.required || []).includes("method")
