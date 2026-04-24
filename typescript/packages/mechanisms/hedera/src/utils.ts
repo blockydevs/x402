@@ -145,22 +145,6 @@ export function getPositiveReceivers(transfers: HederaTransferEntry[]): string[]
 }
 
 /**
- * Convert decimal string/number to atomic units.
- *
- * @param decimalAmount - Decimal amount (e.g. "1.25")
- * @param decimals - Token decimals
- * @returns Atomic amount string
- */
-export function convertToAtomicAmount(decimalAmount: string, decimals: number): string {
-  const [whole = "0", fraction = ""] = decimalAmount.trim().split(".");
-  if (!/^\d+$/.test(whole) || !/^\d*$/.test(fraction)) {
-    throw new Error(`Invalid decimal amount: ${decimalAmount}`);
-  }
-  const paddedFraction = fraction.padEnd(decimals, "0").slice(0, decimals);
-  return BigInt(`${whole}${paddedFraction}`).toString();
-}
-
-/**
  * Canonicalize a Hedera account id or alias when possible.
  *
  * @param accountIdOrAlias - Account or alias value

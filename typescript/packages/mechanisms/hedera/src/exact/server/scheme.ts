@@ -7,11 +7,8 @@ import type {
   Price,
   SchemeNetworkServer,
 } from "@x402/core/types";
-import {
-  assertSupportedHederaNetwork,
-  convertToAtomicAmount,
-  isValidHederaAsset,
-} from "../../utils";
+import { convertToTokenAmount } from "@x402/core/utils";
+import { assertSupportedHederaNetwork, isValidHederaAsset } from "../../utils";
 import {
   HEDERA_MAINNET_CAIP2,
   HEDERA_TESTNET_CAIP2,
@@ -160,7 +157,7 @@ export class ExactHederaScheme implements SchemeNetworkServer {
     }
 
     return {
-      amount: convertToAtomicAmount(amount.toString(), tokenConfig.decimals),
+      amount: convertToTokenAmount(amount.toString(), tokenConfig.decimals),
       asset: tokenConfig.asset,
       extra: {},
     };

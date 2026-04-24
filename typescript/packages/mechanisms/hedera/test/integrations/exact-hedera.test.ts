@@ -463,6 +463,7 @@ describe("Hedera integration", () => {
       expect(accepted).toBeDefined();
 
       const verifyResponse = await server.verifyPayment(paymentPayload, accepted!);
+      console.log(JSON.stringify(verifyResponse));
       expect(verifyResponse.isValid).toBe(true);
 
       const settleResponse = await server.settlePayment(paymentPayload, accepted!);
