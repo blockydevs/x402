@@ -50,4 +50,11 @@ While implementation details vary by network, facilitators MUST enforce security
 - Replay protection: the SNIP-9 nonce MUST be unused at verification; it is consumed on-chain at execution.
 - Simulation verification: MUST simulate the settlement and fail closed unless it shows exactly one asset `Transfer` from payer to `payTo` for the exact amount.
 
-Network-specific rules are in per-network documents: `scheme_exact_svm.md` (Solana), `scheme_exact_stellar.md` (Stellar), `scheme_exact_evm.md` (EVM), `scheme_exact_sui.md` (SUI), `scheme_exact_ton.md` (TON), `scheme_exact_starknet.md` (Starknet).
+### Hedera
+
+- Fee payer safety: under `cryptoTransfer` the fee payer MUST NOT appear as a negative entry in any HBAR transfer list, nor in the token transfer list for `asset`. Under `transferExecutor` the fee payer's net debit in the settlement record's HBAR transfer list MUST equal the network fee exactly, or the network fee plus `requirements.amount` where the fee payer is also the payer of an HBAR payment.
+- Transfer correctness: the net credit to `payTo` in `asset` MUST equal `requirements.amount` exactly. Under `cryptoTransfer` the only account with a positive net change in `asset` MUST be `payTo`. Under `transferExecutor` the same guarantee is asserted over the consensus record, which necessarily credits the network's fee collection accounts, so there the only accounts with a negative net change in any transfer list MUST be the payer and the fee payer.
+- Payer signature validity (`cryptoTransfer`): the facilitator MUST fetch the inferred payer's on-chain account key and confirm the payload carries a signature satisfying it, including KeyList and threshold accounts, before sponsoring. A payload signed with the wrong key or left unsigned MUST be rejected at verification rather than left to fail at consensus.
+- Facilitator-built call (`transferExecutor`): `from` MUST come from `payload.payer` and `asset`, `to` and `amount` from the requirements, never from client-supplied calldata; the facilitator MUST simulate the call and reject on revert, and MUST submit it with an explicit gas limit; after settlement it MUST establish the credit from the merged parent and child consensus records, never from the receipt status alone.
+
+Network-specific rules are in per-network documents: `scheme_exact_svm.md` (Solana), `scheme_exact_stellar.md` (Stellar), `scheme_exact_evm.md` (EVM), `scheme_exact_sui.md` (SUI), `scheme_exact_ton.md` (TON), `scheme_exact_starknet.md` (Starknet), `scheme_exact_hedera.md` (Hedera).
