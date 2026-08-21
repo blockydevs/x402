@@ -261,7 +261,7 @@ An executor MUST implement:
 ```solidity
 interface ITransferExecutor {
     /// Moves exactly `amount` of `asset` from `from` to `to` if, and only if,
-    /// `authorization` permits it. MUST revert otherwise. MUST NOT return a value.
+    /// `authorization` permits it. MUST revert otherwise. Any returned data is ignored.
     /// `asset == address(0)` denotes HBAR; otherwise the HTS token's EVM address.
     function executeTransfer(
         address from,
@@ -278,24 +278,26 @@ Requirements on an executor:
 - It MUST bind `authorization` to `from`, `asset`, `to` and `amount` (or to values that imply them),
   so a facilitator cannot reuse an authorization for a different transfer, and MUST revert on any
   mismatch. Whether an authorization is single-use or multi-use is the executor's choice.
-- It MUST revert, not return, on failure. A return value is ignored; a `SUCCESS` receipt with no
-  transfer is treated as a failed settlement (Phase 4).
+- It MUST signal failure by reverting. Returned data is ignored, so returning `false` is not a
+  failure signal: a `SUCCESS` receipt with no transfer is a failed settlement (Phase 4).
 - It MUST NOT depend on `msg.value` and MUST NOT debit any account other than `from`.
-- Funds move either from the executor's own balance (when `from` is the executor or an account it
-  custodies) or via a HIP-336 allowance from `from` to the executor.
+- Funds move either from the executor's own balance, where `from` is the executor's account, or via
+  a HIP-336 allowance from `from` to the executor. The account debited MUST be `from`; settlement
+  rule 3 fails any other debit.
 
 `executeTransfer` is the only function a facilitator calls. Everything else about the executor
 (how authorizations are created, policies, key management) is opaque to x402.
 
 The interface name is NOT normative: conformance is by function signature, whose selector is
-`0xea8f19fd`. The interface is deliberately protocol-agnostic, so a contract that already exposes
-it for other callers needs no x402-specific surface.
+`0xea8f19fd`, which does not encode return types, so a contract that returns data still conforms.
+The interface is deliberately protocol-agnostic, so a contract that already exposes it for other
+callers needs no x402-specific surface.
 
 ### Prerequisites
 
 1. **Executor contract.** A contract implementing `ITransferExecutor` deployed on `network`.
-2. **Funding path.** Either the executor holds the funds, or `payer` has granted the executor a
-   HIP-336 allowance for `asset` covering `amount`.
+2. **Funding path.** Either `payer` is the executor's own account and holds the funds, or `payer`
+   has granted the executor a HIP-336 allowance for `asset` covering `amount`.
 3. **Association.** For HTS assets, `payTo` MUST be associated with `asset` or hold a free
    auto-association slot.
 4. **Addressability.** `payer`, `payTo` and `executor` MUST resolve to EVM addresses. Facilitators
@@ -303,6 +305,10 @@ it for other callers needs no x402-specific surface.
    exists; the long-zero form of an alias-bearing account does not resolve in HTS calls.
 5. **Client authorization.** The Client is able to produce an `authorization` the executor accepts
    for this exact transfer.
+6. **No custom fees on `asset`.** A fixed or fractional custom fee credits fee collectors and makes
+   the credit to `payTo` differ from the debit to `payer`, which `exact` cannot express. The
+   facilitator MUST read the token's fee schedule at verification and reject with
+   `invalid_exact_hedera_custom_fee_asset`.
 
 ### Phase 1: Obtaining an authorization
 
@@ -342,7 +348,8 @@ on-chain window and the resource server's willingness to wait cannot drift apart
 
 The `payload` field must contain:
 
-- `payer`: Hedera account id (`0.0.x`) whose funds are debited. Passed as `from`.
+- `payer`: Hedera account id (`0.0.x`) whose funds are debited, passed as `from`. MUST be the
+  account the settlement record shows debited, so a vault holding the funds itself is named here.
 - `executor`: Hedera contract id (`0.0.x`) of the `ITransferExecutor` acting for the payer.
 - `authorization`: `0x`-prefixed hex, opaque bytes the executor validates.
 
@@ -383,12 +390,19 @@ transfer calldata.
 Unlike `cryptoTransfer`, `transferExecutor` verification is performed entirely through simulation.
 The `authorization` is opaque to the facilitator but verifiable by simulating the intended call.
 
+Simulation covers whatever conditions the executor imposes; an enumerated set of state reads cannot,
+because the executor MAY impose any condition. A facilitator that understands a specific
+authorization format MUST define a separate `assetTransferMethod` for it: within `transferExecutor`
+that knowledge MAY narrow what is accepted (executor allowlist, caps) but MUST NOT replace the
+simulation.
+
 The facilitator:
 
 1. **Validates shape.** `extra.assetTransferMethod == "transferExecutor"`; `payload.payer` and
    `payload.executor` are well-formed Hedera ids; `payload.authorization` is `0x`-prefixed hex.
    Network and asset rules of `cryptoTransfer` (rule 3) apply unchanged. Reject with
-   `invalid_payload` / `invalid_payment_requirements`.
+   `invalid_payload` / `invalid_payment_requirements`. An HTS `asset` with any custom fee is
+   rejected with `invalid_exact_hedera_custom_fee_asset` (Prerequisite 6).
 2. **Checks method support.** It implements `transferExecutor` on `network`; otherwise
    `invalid_exact_hedera_unsupported_asset_transfer_method`.
 3. **Resolves addresses.** `payer` and `payTo` to EVM addresses (Prerequisite 4), rejecting with
@@ -399,8 +413,8 @@ The facilitator:
    `executeTransfer(from = payer, asset, to = payTo, amount, authorization)`. The facilitator MUST
    build these arguments from `PaymentRequirements` and `payload.payer` only; it MUST NOT accept a
    client-supplied calldata blob.
-5. **Simulates** that call against `executor` from its submitting account, with the gas limit it
-   will use at settlement (`ContractCallLocal` or JSON-RPC `eth_call`), to verify:
+5. **Simulates** that call against `executor` from the account it will submit from, with the gas
+   limit it will use at settlement, to verify:
    - the authorization is valid and permits exactly this transfer;
    - the payer has sufficient balance / allowance;
    - the transaction will succeed when executed.
@@ -408,7 +422,9 @@ The facilitator:
    explicit gas limit is required by Security Consideration 4, and a facilitator that can measure
    simulated usage SHOULD reject an unexpectedly high figure (`simulation_gas_exceeded`), which may
    indicate an executor designed to drain the fee payer. Where only a ceiling is enforced, an
-   over-budget call surfaces as a revert.
+   over-budget call surfaces as a revert. The simulation channel MUST execute state-changing calls,
+   including calls into the HTS system contract; a read-only channel reports reverts that settlement
+   would not produce.
 
 If the simulation succeeds, the payment is considered valid. A passing simulation MUST NOT be
 reported as settlement and MUST NOT cause the resource server to release the resource; state can
@@ -416,9 +432,11 @@ change between `/verify` and `/settle`, and the settlement proof (Phase 4) is th
 payment.
 
 The facilitator SHOULD read state that gates the call (nonces, allowances) from a consensus or
-mirror node rather than a JSON-RPC relay, which may serve slightly stale state, and SHOULD track
-the hash of `(network, executor, payer, authorization)` to reject a payload already settled or in
-flight. On-chain replay protection is the executor's responsibility.
+mirror node rather than a JSON-RPC relay, which may serve slightly stale state, and SHOULD reject a
+payload identical to one it already has in flight, keyed on the hash of
+`(network, executor, payer, authorization)`. It MUST NOT reject one because an identical payload
+settled earlier: an authorization MAY be multi-use, and a standing policy presents the same bytes on
+every payment. On-chain replay protection is the executor's responsibility.
 
 Facilitators MAY introduce stricter limits (executor allowlists, max amount, allowed assets, gas
 caps) but MUST NOT relax the above constraints.
@@ -434,9 +452,11 @@ caps) but MUST NOT relax the above constraints.
    (transfers made by a contract appear in child records, not in the parent) and merge their transfer
    lists: the HBAR list when `asset == "0.0.0"`, otherwise the token transfer list for `asset`.
 3. The facilitator MUST report `success: false` unless all hold on the merged lists:
-   - net credit to `payTo` in `asset` equals `amount` exactly, and no account other than `payTo` has a
-     positive net transfer in `asset` (fee-payer credits from fee distribution excepted, as in
-     `cryptoTransfer`);
+   - the net credit to `payTo` in `asset` equals `amount` exactly;
+   - the positive net changes in `asset` other than `payTo`'s sum to the record's `transactionFee`.
+     Unlike `cryptoTransfer`, this runs on a consensus record, which always credits the node, fee
+     collection and staking accounts; for HBAR those credits share the payment's list. An HTS token
+     list carries no fee distribution, so there `payTo` MUST be the only credit;
    - the only debited accounts are `payer` (by `amount` in `asset`) and the fee payer (by the
      transaction fee in HBAR). Any third debited account MUST fail the settlement, so a hostile
      executor cannot touch an account nobody expected. When `payer` is the fee payer, the single HBAR
@@ -469,7 +489,7 @@ caps) but MUST NOT relax the above constraints.
 ```
 
 - `payer`: the account debited `amount`.
-- `extensions.settlementProof` (OPTIONAL, proposed): the figures the facilitator asserted, so a
+- `extensions.settlementProof` (OPTIONAL): the figures the facilitator asserted, so a
   resource server can log or re-check them. Amounts in the asset's smallest unit and signed as the
   record reports them, so debits are negative; `transactionFee` in tinybars, always positive because
   it names a cost rather than a transfer. The transaction id is already in `transaction` and is not
@@ -484,12 +504,13 @@ apply as usual. Method-specific values:
 
 | Code | Meaning |
 | --- | --- |
-| `invalid_asset_transfer_method` | `extra.assetTransferMethod` is not a value this mechanism defines |
+| `invalid_exact_hedera_asset_transfer_method` | `extra.assetTransferMethod` is not a value this mechanism defines |
 | `invalid_exact_hedera_unsupported_asset_transfer_method` | the method is defined but this facilitator does not implement it on `network` |
 | `invalid_exact_hedera_payload_transfer_executor` | `payload` is absent or not an object |
 | `invalid_exact_hedera_payload_payer` | `payload.payer` missing or not a Hedera account id |
 | `invalid_exact_hedera_payload_executor` | `payload.executor` missing or not a Hedera contract id |
 | `invalid_exact_hedera_payload_authorization` | `payload.authorization` not `0x`-prefixed hex |
+| `invalid_exact_hedera_custom_fee_asset` | `asset` has a custom fee schedule, so `exact` cannot hold (Prerequisite 6) |
 | `address_resolution_failed` | `payer` or `payTo` could not be resolved to an EVM address |
 | `simulation_reverted` | `executeTransfer` reverted in simulation |
 | `simulation_gas_exceeded` | OPTIONAL; simulated gas above the facilitator's bound |
@@ -506,10 +527,11 @@ vocabulary and distinct from the facilitator's `invalidReason`.
 
 ### Security Considerations
 
-1. **Fee payer safety.** The fee payer is only ever debited the transaction fee; settlement rule 3
-   makes any other debit a failed settlement. The executor spends from `from` (allowance or own
-   balance), never from the sender of the wrapping transaction, so the fee payer's balances and
-   allowances are never referenced by the call it signs.
+1. **Fee payer safety.** The executor spends from `from` (allowance or own balance), never from the
+   sender of the wrapping transaction, so the fee payer's balances and allowances are never
+   referenced by the call it signs, and the gas limit (Consideration 4) bounds the fee. Settlement
+   rule 3 makes any other debit a failed settlement, but only after consensus, when the fee is
+   already spent.
 2. **Authorization scope.** The facilitator constructs `from`, `asset`, `to` and `amount` itself
    and cannot resize or redirect the payment; the executor decides only whether the authorization
    permits that exact transfer. The executor is responsible for bounding what an authorization may
@@ -525,23 +547,26 @@ vocabulary and distinct from the facilitator's `invalidReason`.
 5. **Post-settlement verification (TOCTOU).** Simulation proves a call *would* succeed, not that it
    *did*. The record-based proof in Phase 4 is mandatory precisely because a receipt of `SUCCESS` is
    compatible with no funds moving.
-6. **Replay.** On chain: the executor's nonce and validity window. Off chain: facilitator idempotency
-   on the authorization hash. Resource servers SHOULD refuse to serve twice for one `transaction`.
+6. **Replay.** On chain: the executor's nonce and validity window, the only authoritative defence.
+   Off chain: the facilitator's in-flight guard on the authorization hash, which does not block a
+   multi-use authorization (Phase 3). Resource servers SHOULD refuse to serve twice for one
+   `transaction`.
 7. **Settlement atomicity.** One transaction moves the funds; a revert rolls everything back. Soft
    failure (no revert, no transfer) is detected by record, never by receipt.
 8. **Account aliases.** The alias / auto-account-creation policy of `cryptoTransfer` applies to
    `payTo` credits produced by the executor.
 
-Security invariants, in the style of the SVM spec:
+Security invariants, in the style of the SVM spec. A rule that reads a consensus record can only
+report a violation that already happened, so prevention and detection are listed separately:
 
-| ID | Invariant | Enforced by |
-| --- | --- | --- |
-| I1 | Fee payer is never debited beyond the network fee | Settlement rule 3 |
-| I2 | `payTo` is credited exactly `amount` of `asset` | Facilitator-built call + settlement rule 3 |
-| I3 | Only `payer` is debited `amount` | Facilitator-built call + settlement rule 3 |
-| I4 | Settlement success equals on-chain effect | Settlement rules 2 to 4 |
-| I5 | Simulation is a viability and cost check, not the security boundary | Phase 3 closing paragraph |
-| I6 | The facilitator cannot resize or redirect the payment | Verification rule 4 |
+| ID | Invariant | Prevented by | Detected by |
+| --- | --- | --- | --- |
+| I1 | Fee payer is never debited beyond the network fee | Executor spends from `from`, never from the wrapping transaction's sender; the fee payer grants it no allowance; explicit gas limit (Considerations 1 and 4) | Settlement rule 3 |
+| I2 | `payTo` is credited exactly `amount` of `asset` | Facilitator-built call (verification rule 4); assets with custom fees rejected at verification (Prerequisite 6) | Settlement rule 3 |
+| I3 | Only `payer` is debited `amount` | Facilitator-built call; executor MUST NOT debit any account other than `from` | Settlement rule 3 |
+| I4 | Settlement success equals on-chain effect | n/a; this invariant is the detection itself | Settlement rules 2 to 4 |
+| I5 | Simulation is a viability and cost check, not the security boundary | n/a; a statement of the model, see Phase 3 | n/a |
+| I6 | The facilitator cannot resize or redirect the payment | Verification rule 4 | Settlement rule 3 |
 
 ### Comparison to `cryptoTransfer`
 
