@@ -28,9 +28,8 @@ another method.
 In all cases, the Facilitator cannot modify the amount or destination. It only broadcasts the
 transaction and sponsors its fee.
 
-The sections from `Protocol Flow` through `Facilitator Verification Rules` below define the default
-`cryptoTransfer` method (rule 1, "MUST be a `TransferTransaction` directly", applies to that method
-only). The `transferExecutor` method is defined in its own section.
+Each method is defined in its own section below. Rules stated under one method apply to that method
+only: verification rule 1, "MUST be a `TransferTransaction` directly", is a `cryptoTransfer` rule.
 
 Facilitators SHOULD advertise the methods they implement per network in `/supported`:
 
@@ -51,7 +50,9 @@ Facilitators SHOULD advertise the methods they implement per network in `/suppor
 }
 ```
 
-## Protocol Flow
+## AssetTransferMethod: `cryptoTransfer`
+
+### Protocol Flow
 
 The protocol flow for `exact` on Hedera is client-driven.
 
@@ -70,7 +71,7 @@ The protocol flow for `exact` on Hedera is client-driven.
 13. Upon successful on‑chain settlement, the **Facilitator Server** responds with a `SettlementResponse` to the **Resource Server**.
 14. **Resource Server** grants the **Client** access to the resource in its response.
 
-## `PaymentRequirements` for `exact`
+### `PaymentRequirements` for `exact`
 
 In addition to the standard x402 `PaymentRequirements` fields, the `exact` scheme on Hedera requires the following inside the `extra` field:
 
@@ -93,7 +94,7 @@ In addition to the standard x402 `PaymentRequirements` fields, the `exact` schem
 - `payTo`: The Hedera account ID of the resource server receiving the funds.
 - `extra.feePayer`: The Hedera account ID that will pay the transaction fees. This is typically the facilitator’s account; this account must also sign the transaction as the fee payer.
 
-## PaymentPayload `payload` Field
+### PaymentPayload `payload` Field
 
 The `payload` field of the `PaymentPayload` contains:
 
@@ -132,7 +133,7 @@ Full `PaymentPayload` object:
 }
 ```
 
-## `SettlementResponse`
+### `SettlementResponse`
 
 The `SettlementResponse` for the `exact` scheme on Hedera:
 
@@ -148,11 +149,11 @@ The `SettlementResponse` for the `exact` scheme on Hedera:
 - `transactionId`: The Hedera transaction ID of the submitted transaction.
 - `payer`: The Hedera account ID of the fee payer that sponsored the transaction.
 
-## Facilitator Verification Rules (MUST)
+### Facilitator Verification Rules (MUST)
 
 A facilitator verifying an `exact`‑scheme Hedera payment MUST enforce all of the following checks before sponsoring and signing the transaction.
 
-### 1. Transaction layout
+#### 1. Transaction layout
 
 - The decompiled transaction MUST be a `TransferTransaction` **directly**. It MUST NOT be wrapped in a `ScheduleCreateTransaction` or any other transaction type.
 - The transaction MUST:
@@ -161,14 +162,14 @@ A facilitator verifying an `exact`‑scheme Hedera payment MUST enforce all of t
   3. Have the net sum of all HBAR transfers equal zero.
   4. Have the net sum of all transfers for the specified `asset` equal zero.
 
-### 2. Fee payer safety
+#### 2. Fee payer safety
 
 - The configured `feePayer` (`PaymentRequirements.extra.feePayer`) MUST:
   - NOT appear as a **negative** entry in any HBAR transfer list.
   - NOT appear as a **negative** entry in the token transfer list for the specified `asset`.
 - The `feePayer` MAY appear as a positive entry (i.e., receive value), for example when collecting fees or custom fee distributions, but it MUST NOT be the net sender of funds in the payment transaction; it only sponsors network fees via `transactionId.accountId`.
 
-### 3. Network and asset correctness
+#### 3. Network and asset correctness
 
 - The `network` field in `PaymentRequirements` MUST be a valid Hedera CAIP-2 network identifier corresponding to the Hedera network on which the transaction will be submitted (e.g. `hedera:mainnet`, `hedera:testnet`).
 - The `asset` in `PaymentRequirements` MUST be:
@@ -176,7 +177,7 @@ A facilitator verifying an `exact`‑scheme Hedera payment MUST enforce all of t
   - A valid fungible token ID for an HTS fungible token.
 - All token transfers in the transaction MUST be for the single `asset` specified in `PaymentRequirements.asset`. No other token IDs may appear.
 
-### 4. Transfer intent and destination
+#### 4. Transfer intent and destination
 
 - The transaction MUST transfer value from the client’s account(s) to the `payTo` account specified in `PaymentRequirements.payTo`.
 - For HBAR payments:
@@ -184,7 +185,7 @@ A facilitator verifying an `exact`‑scheme Hedera payment MUST enforce all of t
 - For HTS FT payments:
   - The net token amount credited to `payTo` for `asset` MUST equal `PaymentRequirements.amount`.
 
-### 5. Amount exactness
+#### 5. Amount exactness
 
 - The `amount` transferred to `payTo` for the given `asset` MUST equal `PaymentRequirements.amount` **exactly**.
 - No additional positive net transfers to any other party (besides `payTo`) may exist for the specified `asset`.
@@ -192,7 +193,7 @@ A facilitator verifying an `exact`‑scheme Hedera payment MUST enforce all of t
   - The net amount to `payTo` is not exactly equal to `PaymentRequirements.amount`, or
   - The client is sending more than `PaymentRequirements.amount` in total for the specified `asset`.
 
-### 6. Payer signature, general validity, and replay protection
+#### 6. Payer signature, general validity, and replay protection
 
 - The facilitator MUST verify that the inferred payer actually signed the frozen transaction body before sponsoring it. The facilitator fetches the payer's onchain account key (e.g. via a consensus-node `AccountInfoQuery`) and checks that the transaction carries a valid signature satisfying that key, including KeyList/threshold accounts. A transaction signed with the wrong key, or left unsigned, MUST be rejected (reason `invalid_exact_hedera_payload_signature_invalid`). Without this check a payload that fails at settlement with `INVALID_SIGNATURE` would otherwise pass verification.
 - The transaction MUST:
@@ -203,7 +204,7 @@ A facilitator verifying an `exact`‑scheme Hedera payment MUST enforce all of t
 
 These checks are security‑critical to ensure the fee payer cannot be tricked into transferring their own funds or sponsoring unintended actions. Implementations MAY introduce stricter limits (e.g., additional policy around max fee, max amount, or allowed token lists) but MUST NOT relax the above constraints.
 
-### Account aliases and auto-account creation
+#### Account aliases and auto-account creation
 
 When the resource server’s `payTo` is specified as an **account alias** (e.g. an EVM address or public key alias) rather than an existing account ID, a transfer of HBAR to that alias can trigger **auto-account creation** on Hedera. In that case, the facilitator effectively funds the creation of the new account (the first transfer to the alias creates the account and credits it). A malicious or poorly configured resource server could use this to have facilitators pay for account creation on its behalf.
 
@@ -310,7 +311,14 @@ read as a wildcard; `"*"` admits every contract, MUST be written out, and is NOT
 Admission is by address, not by code, so a facilitator SHOULD prefer an executor that cannot change
 under it (no `admin_key`, no upgrade path) and MUST apply the Phase 4 checks on every settlement. A
 facilitator that cannot read a settled transaction's child records and logs MUST NOT advertise
-`transferExecutor`. Resource servers MAY keep a narrower list (`executor_not_allowed`).
+`transferExecutor`.
+
+A resource server offering `transferExecutor` MUST carry `extra.executors` in its
+`PaymentRequirements`, taken from the `extra.executors` its facilitator advertises for that
+`network` in `/supported`, and a Client MUST pick `payload.executor` from that list. A server MAY
+narrow the list and MUST NOT widen it, and MAY publish `"*"` only where the facilitator advertises
+`"*"`. An omitted or empty list admits nothing. The facilitator judges `payload.executor` against
+its own list and MUST reject an executor absent from it, whatever the requirements named.
 
 ### Prerequisites
 
@@ -354,7 +362,8 @@ on-chain window and the resource server's willingness to wait cannot drift apart
   "payTo": "0.0.4001",
   "maxTimeoutSeconds": 120,
   "extra": {
-    "assetTransferMethod": "transferExecutor"
+    "assetTransferMethod": "transferExecutor",
+    "executors": ["0.0.7000"]
   }
 }
 ```
@@ -362,6 +371,9 @@ on-chain window and the resource server's willingness to wait cannot drift apart
 **`extra` field definitions specific to `transferExecutor`:**
 
 - `extra.assetTransferMethod` (required): MUST be `"transferExecutor"`.
+- `extra.executors` (required): the executors this server accepts, mirrored from the facilitator's
+  `/supported` and optionally narrowed (Executor admission). The Client picks `payload.executor`
+  from it, so a quote that omits the field cannot be paid.
 - `extra.feePayer` (optional): ignored by this method. Resource servers that serve both methods
   from one `accepts[]` entry MAY leave it in place for `cryptoTransfer` clients.
 
@@ -390,7 +402,8 @@ Full `PaymentPayload` object:
     "payTo": "0.0.4001",
     "maxTimeoutSeconds": 120,
     "extra": {
-      "assetTransferMethod": "transferExecutor"
+      "assetTransferMethod": "transferExecutor",
+      "executors": ["0.0.7000"]
     }
   },
   "payload": {
@@ -611,7 +624,7 @@ report a violation that already happened, so prevention and detection are listed
 | Facilitator verifies | Transfer list + payer signature | Admission + simulation + consensus-record checks |
 | Replay protection | Hedera transaction id | Single-use authorization, consumed by the executor |
 | `extra.feePayer` | Required | Not used |
-| Executor choice | n/a | Client, among the executors the facilitator admits |
+| Executor choice | n/a | Client, among the executors the requirements publish |
 | Fee payer exposure | Fee only (rule 2) | Fee only (settlement rule 3) |
 | Payer universe | Key-controlled accounts | Contract-controlled funds |
 
